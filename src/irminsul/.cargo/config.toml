@@ -1,0 +1,5 @@
+# Build a fully self-contained single-file executable: statically link the C
+# runtime so the binary has no VCRUNTIME140.dll dependency.  Applies to all
+# builds on the msvc target; on other targets this is ignored.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1,0 +1,48 @@
+[package]
+name = "irminsul"
+version = "0.2.2"
+authors = ["Konkers <konkers@konkers.net>"]
+edition = "2024"
+include = ["LICENSE", "**/*.rs", "Cargo.toml", "keys/**"]
+rust-version = "1.85"
+
+[dependencies]
+auto-artifactarium = { git = "https://github.com/konkers/auto-artifactarium", rev = "4ba25fac64b88970143af6bc2a2ef51338e620d0" }
+anyhow = "1.0.99"
+async-trait = "0.1.92"
+base64 = "0.22.1"
+chrono = "0.4.42"
+clap = { version = "4.5.47", features = ["derive"] }
+futures = "0.3.31"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+tokio = { version = "1.47.1", features = [
+	"rt",
+	"macros",
+	"rt-multi-thread",
+	"signal",
+	"time",
+] }
+tracing = "0.1.41"
+tracing-appender = "0.2.3"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+
+[target.'cfg(windows)'.dependencies]
+pktmon = { version = "0.6.2", features = ["tokio"] }
+windows = { version = "0.61.3", features = [
+	"Win32_Foundation",
+	"Win32_System_Console",
+	"Win32_System_Diagnostics_ToolHelp",
+	# SHELLEXECUTEINFOW / ShellExecuteExW are gated behind this feature.
+	"Win32_System_Registry",
+	"Win32_UI_Shell",
+	"Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = 2
+strip = true
+
+# Optimize all dependencies even in debug builds:
+[profile.dev.package."*"]
+opt-level = 2

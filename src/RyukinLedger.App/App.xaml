@@ -1,0 +1,17 @@
+<Application x:Class="RyukinLedger.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ShutdownMode="OnExplicitShutdown">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <!--
+                  Shared between both windows: the wish-resource chips appear in
+                  the main window and in the calculator, and two copies of the
+                  same style is how they end up looking different.
+                -->
+                <ResourceDictionary Source="Themes/Chip.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

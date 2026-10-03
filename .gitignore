@@ -1,0 +1,40 @@
+# Build output
+#
+# tools\build.ps1 assembles the runnable application here (RyukinLedger.exe,
+# irminsul.exe and a copy of assets\).  It is regenerated on every build, so
+# there is nothing in it worth versioning -- releases are published from it,
+# not committed from it.
+dist/
+
+# .NET
+#
+# bin\ and obj\ are matched at any depth: the application project lives in a
+# subfolder today and may move.
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+.vs/
+
+# Rust
+#
+# The capture core's build tree.  Half a gigabyte of object files, and it
+# contains absolute paths from whatever machine built it.
+target/
+
+# OS and editors
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+*~
+
+# NOT ignored, on purpose:
+#
+#   src/irminsul/.cargo/config.toml   static CRT linking: part of the build, not a
+#                                 local preference
+#   src/irminsul/keys/gi.json         the initial session keys, embedded in the
+#                                 binary with include_bytes!
+#   assets/                       the artwork; the application copies it into
+#                                 the output folder
+#   shot-*.png                    screenshots used in the README

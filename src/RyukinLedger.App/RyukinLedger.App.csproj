@@ -1,0 +1,87 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <!-- The tray icon is System.Windows.Forms.NotifyIcon: it ships with the
+         Windows Desktop runtime, so it costs no NuGet package and no extra DLL
+         next to the executable. -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>RyukinLedger</AssemblyName>
+
+    <!--
+      The executable's own icon: the one Explorer, the task bar and any shortcut
+      show.  This is the only place the icon is embedded.  Window.Icon and the
+      tray icon both load assets\app.ico from disk instead, so the same 148 KB
+      is not carried inside the assembly twice.
+    -->
+    <ApplicationIcon>..\..\assets\app.ico</ApplicationIcon>
+
+    <RootNamespace>RyukinLedger.App</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- 版本号不在这里，在仓库根目录的 Directory.Build.props。 -->
+    <Product>RyukinLedger</Product>
+    <AssemblyTitle>RyukinLedger</AssemblyTitle>
+    <Company>RyukinLedger</Company>
+    <Description>Genshin Impact currency ledger</Description>
+
+    <!--
+      Packaging is deliberately boring, because the packaging is what the
+      SmartScreen investigation is about:
+        * framework-dependent, so the exe is a plain PE with no self-extracting
+          stub that unpacks itself into %TEMP%;
+        * no single-file bundle, no trimming, no ReadyToRun.
+    -->
+    <SelfContained>false</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <InvariantGlobalization>false</InvariantGlobalization>
+
+    <!--
+      WFO0003 tells WinForms projects to configure high DPI through
+      Application.SetHighDpiMode instead of the manifest.  This is a WPF
+      application: the manifest is the correct place for per-monitor DPI
+      awareness here, and the only WinForms object in the process is the tray
+      icon, which has no DPI setting of its own.
+    -->
+    <NoWarn>$(NoWarn);WFO0003</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Turning on WinForms for the tray icon also turns on its implicit usings,
+      and those collide head-on with WPF: System.Drawing.Brush versus
+      System.Windows.Media.Brush, System.Windows.Forms.Application versus
+      System.Windows.Application, System.Drawing.Point versus System.Windows.Point.
+
+      Removing the two global usings is better than sprinkling aliases through
+      every file: the tray is the only WinForms consumer, and it already uses
+      explicit aliases for the three types it needs.
+    -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Artwork travels next to the executable instead of inside it.  The
+      background illustration alone is several megabytes, and an embedded copy
+      would put all of it into the assembly for no benefit; loose files also mean
+      the picture can be swapped without a rebuild.
+
+      The link puts them in an "assets" folder in the output, which is where
+      AssetLibrary looks for them.  Nothing here is required: if the folder is
+      absent the interface simply draws without artwork.
+    -->
+    <Content Include="..\..\assets\**\*" Link="assets\%(RecursiveDir)%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>

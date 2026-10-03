@@ -1,0 +1,343 @@
+<Window x:Class="RyukinLedger.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:RyukinLedger.App.Views"
+        Title="硫金账本 · RyukinLedger" Height="930" Width="1180"
+        MinHeight="600" MinWidth="960"
+        FontFamily="Segoe UI, Microsoft YaHei UI"
+        UseLayoutRounding="True"
+        WindowStartupLocation="CenterScreen">
+
+    <!--
+      暖色调浅色主题。立绘是白底的，浅色主题能让它自然融进去，不需要抠图。
+    -->
+    <Window.Background>
+        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#FDF9F4" Offset="0" />
+            <GradientStop Color="#F8F4EF" Offset="0.5" />
+            <GradientStop Color="#F0F3F7" Offset="1" />
+        </LinearGradientBrush>
+    </Window.Background>
+
+    <Window.Resources>
+        <!--
+          约 70% 的白。这不是随便定的：最坏情况是立绘上一块饱和的红
+          (#E86A50) 透上来，卡片会变成 #F8D2CA，深色文字在它上面的对比度
+          仍有 11:1 左右，读数完全不受影响——所以可以放心再透一点。
+        -->
+        <Style x:Key="Card" TargetType="Border">
+            <Setter Property="Background" Value="#B3FFFFFF" />
+            <Setter Property="BorderBrush" Value="#E4D6C8" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="12" />
+            <Setter Property="Padding" Value="16" />
+        </Style>
+
+        <Style x:Key="SectionTitle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="#2B2521" />
+        </Style>
+
+        <Style x:Key="ToolButton" TargetType="Button">
+            <Setter Property="Padding" Value="14,7" />
+            <Setter Property="Background" Value="#E8FFFFFF" />
+            <Setter Property="BorderBrush" Value="#DCCDBC" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Foreground" Value="#2B2521" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Chrome"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="7"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Chrome" Property="Background" Value="#FFF4E6" />
+                                <Setter TargetName="Chrome" Property="BorderBrush" Value="#D9B98A" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.4" />
+                                <Setter Property="Cursor" Value="Arrow" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 表头：去掉系统默认的灰色渐变，换成一条暖色细线 -->
+        <Style TargetType="GridViewColumnHeader">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="#E0D2C2" />
+            <Setter Property="BorderThickness" Value="0,0,0,1" />
+            <Setter Property="Padding" Value="6,7" />
+            <Setter Property="Foreground" Value="#8C8074" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="FontWeight" Value="Normal" />
+            <Setter Property="HorizontalContentAlignment" Value="Left" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="GridViewColumnHeader">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="Center" />
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style TargetType="ListViewItem">
+            <Setter Property="Padding" Value="2,3" />
+            <Setter Property="Foreground" Value="#3A322C" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListViewItem">
+                        <Border x:Name="Row" Background="Transparent" CornerRadius="5"
+                                Padding="{TemplateBinding Padding}">
+                            <GridViewRowPresenter VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Row" Property="Background" Value="#F7EFE4" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Row" Property="Background" Value="#F2E4D2" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <!--
+          背景立绘：整窗铺满，不做任何"留白给它"的布局安排——它就在所有控件后面，
+          靠卡片的半透明透出来。
+          对齐方式是 Top 而不是默认的居中：立绘是竖幅，铺满 1180 宽后高度远超窗口，
+          居中的话会把上面的金鱼裁掉，只留下身子。
+        -->
+        <Rectangle x:Name="BackdropArt" IsHitTestVisible="False" Opacity="0.52"
+                   Visibility="Collapsed">
+            <Rectangle.Fill>
+                <ImageBrush x:Name="BackdropArtBrush"
+                            Stretch="UniformToFill" AlignmentX="Center" AlignmentY="Top" />
+            </Rectangle.Fill>
+            <Rectangle.Effect>
+                <!--
+                  固定「淡」档。两个极端都实测过：半径 12 时透过卡片只剩一团
+                  认不出来是什么的色块，金鱼和人都没了；完全不透明 + 半径 3.5
+                  又太抢眼，压着图表读数。
+                -->
+                <BlurEffect Radius="6.0" KernelType="Gaussian" />
+            </Rectangle.Effect>
+        </Rectangle>
+
+        <Grid Margin="16">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- 标题与控制 -->
+            <Grid Grid.Row="0" Margin="2,0,2,12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel>
+                    <TextBlock FontSize="22" FontWeight="SemiBold" Foreground="#2B2521">
+                        <Run Text="硫金账本" />
+                        <Run Text="RyukinLedger" FontSize="13" FontWeight="Normal" Foreground="#9C8F82" />
+                    </TextBlock>
+                    <TextBlock x:Name="SubtitleText" FontSize="12" Foreground="#8C8074" Margin="0,4,0,0" />
+                    <Border Height="2" Width="54" HorizontalAlignment="Left" Margin="0,8,0,0" CornerRadius="1">
+                        <Border.Background>
+                            <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                <GradientStop Color="#E8B15C" Offset="0" />
+                                <GradientStop Color="#E2604A" Offset="1" />
+                            </LinearGradientBrush>
+                        </Border.Background>
+                    </Border>
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button x:Name="StartButton" Content="开始记录" Style="{StaticResource ToolButton}"
+                            Margin="0,0,8,0" Click="OnStartCoreClick" />
+                    <Button x:Name="StopButton" Content="停止记录" Style="{StaticResource ToolButton}"
+                            Margin="0,0,8,0" Click="OnStopCoreClick" />
+                    <Button x:Name="OpenFolderButton" Content="打开数据目录" Style="{StaticResource ToolButton}"
+                            Click="OnOpenDataFolderClick" />
+
+                    <!-- 分隔线：左边是录制控制，右边是另一个工具，不是同一类 -->
+                    <Border Width="1" Background="#E0D2C2" Margin="12,6,12,6" />
+
+                    <Button x:Name="GachaButton" Content="抽卡计算器" Style="{StaticResource ToolButton}"
+                            Click="OnOpenGachaClick" />
+                </StackPanel>
+            </Grid>
+
+            <!-- 抓包状态：使用者最需要知道的一件事 -->
+            <Border Grid.Row="1" x:Name="StatusBanner" Style="{StaticResource Card}"
+                    Padding="14,11" Margin="0,0,0,12">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+
+                    <Ellipse x:Name="StatusDot" Width="10" Height="10" Fill="#C3B8AC"
+                             VerticalAlignment="Center" Margin="0,0,10,0" />
+
+                    <StackPanel Grid.Column="1">
+                        <TextBlock x:Name="StatusText" FontSize="13.5" FontWeight="SemiBold"
+                                   Foreground="#2B2521" TextWrapping="Wrap" />
+                        <TextBlock x:Name="StatusDetail" FontSize="12" Foreground="#7E7268"
+                                   Margin="0,3,0,0" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <Grid Grid.Row="2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="392" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <!-- 资源 -->
+                <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Margin="0,0,12,0">
+                    <StackPanel>
+                        <TextBlock Text="资源" Style="{StaticResource SectionTitle}" Margin="2,0,0,6" />
+                        <UniformGrid x:Name="CurrencyGrid" Columns="2" />
+
+                        <!--
+                          点卡片切换右边的图表：卡片本身就是选择器，所以没有下拉菜单。
+                        -->
+                        <Border Style="{StaticResource Card}" Margin="0,4,0,0">
+                            <StackPanel>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock Text="抽数" Style="{StaticResource SectionTitle}"
+                                               VerticalAlignment="Center" />
+                                    <TextBlock x:Name="PullTotalText" Grid.Column="1" Text="—"
+                                               FontSize="21" FontWeight="SemiBold" Foreground="#2B2521"
+                                               VerticalAlignment="Center" />
+                                </Grid>
+
+                                <!--
+                                  One per row: the name sits at the card's left
+                                  edge and the count at its right, so the four
+                                  counts line up in a single column and can be
+                                  compared down the card.
+                                -->
+                                <views:PullSourcePicker x:Name="PullPicker" Columns="1"
+                                                        Margin="0,10,0,0" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource Card}" Margin="0,12,0,0">
+                            <StackPanel>
+                                <TextBlock Text="账本概况" Style="{StaticResource SectionTitle}" />
+                                <TextBlock x:Name="LedgerSummaryText" FontSize="12" Foreground="#7E7268"
+                                           Margin="0,8,0,0" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+
+                <Grid Grid.Column="1">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <!-- 图表 -->
+                    <Border Grid.Row="0" Style="{StaticResource Card}" Padding="12">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <Grid Margin="4,0,4,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+
+                                <TextBlock x:Name="ChartTitle" Text="每日收支" Style="{StaticResource SectionTitle}"
+                                           VerticalAlignment="Center" />
+
+                                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                    <ComboBox x:Name="RangeSelector" Width="104" Height="28"
+                                              VerticalContentAlignment="Center"
+                                              SelectionChanged="OnChartOptionChanged" />
+                                </StackPanel>
+                            </Grid>
+
+                            <views:DailyChart x:Name="Chart" Grid.Row="1" MinHeight="170" />
+                        </Grid>
+                    </Border>
+
+                    <!-- 最近记录 -->
+                    <Border Grid.Row="1" Style="{StaticResource Card}" Padding="12" Margin="0,12,0,0"
+                            Height="240">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <TextBlock Text="最近记录" Style="{StaticResource SectionTitle}" Margin="4,0,0,8" />
+
+                            <TextBlock x:Name="ActivityEmptyHint" Grid.Row="1"
+                                       Text="还没有记录。启动抓包内核，然后进游戏登录即可。"
+                                       Foreground="#9C8F82" FontSize="12"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                                       Visibility="Collapsed" />
+
+                            <ListView x:Name="ActivityList" Grid.Row="1" BorderThickness="0"
+                                      Background="Transparent" FontSize="12"
+                                      ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                <ListView.View>
+                                    <GridView>
+                                        <GridViewColumn Header="时间" Width="150"
+                                                        DisplayMemberBinding="{Binding TimeText}" />
+                                        <GridViewColumn Header="货币" Width="110"
+                                                        DisplayMemberBinding="{Binding CurrencyText}" />
+                                        <GridViewColumn Header="变动" Width="110"
+                                                        DisplayMemberBinding="{Binding DeltaText}" />
+                                        <GridViewColumn Header="余额" Width="120"
+                                                        DisplayMemberBinding="{Binding BalanceText}" />
+                                    </GridView>
+                                </ListView.View>
+                            </ListView>
+                        </Grid>
+                    </Border>
+                </Grid>
+            </Grid>
+
+            <TextBlock Grid.Row="3" x:Name="DiagnosticsText" FontSize="11" Foreground="#9C8F82"
+                       Margin="2,10,2,0" TextWrapping="Wrap" />
+        </Grid>
+    </Grid>
+</Window>
