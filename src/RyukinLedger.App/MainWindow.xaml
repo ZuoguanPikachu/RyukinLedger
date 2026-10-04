@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:views="clr-namespace:RyukinLedger.App.Views"
         Title="硫金账本 · RyukinLedger" Height="930" Width="1180"
-        MinHeight="600" MinWidth="960"
+        MinHeight="890" MinWidth="960"
         FontFamily="Segoe UI, Microsoft YaHei UI"
         UseLayoutRounding="True"
         WindowStartupLocation="CenterScreen">
@@ -194,7 +194,7 @@
 
             <!-- 抓包状态：使用者最需要知道的一件事 -->
             <Border Grid.Row="1" x:Name="StatusBanner" Style="{StaticResource Card}"
-                    Padding="14,11" Margin="0,0,0,12">
+                    Padding="14,9" Margin="0,0,0,12">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
@@ -220,15 +220,25 @@
                 </Grid.ColumnDefinitions>
 
                 <!-- 资源 -->
+                <!--
+                  资源。
+
+                  这一列的纵向排布是量出来的，不是估的：六张资源卡 + 抽数卡 +
+                  账本概况卡，内容高 650px，而默认窗口（930）给这一列的视口是
+                  678px —— 余量 28px，而且这已经是页脚折成两行的最坏情况。
+
+                  所以这里的 1px 都乘三行卡片：一张卡长 9px，滚动条就回来了。
+                  调字号、间距、内边距之前先算一遍这笔账。
+                -->
                 <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Margin="0,0,12,0">
                     <StackPanel>
-                        <TextBlock Text="资源" Style="{StaticResource SectionTitle}" Margin="2,0,0,6" />
+                        <TextBlock Text="资源" Style="{StaticResource SectionTitle}" Margin="2,0,0,4" />
                         <UniformGrid x:Name="CurrencyGrid" Columns="2" />
 
                         <!--
                           点卡片切换右边的图表：卡片本身就是选择器，所以没有下拉菜单。
                         -->
-                        <Border Style="{StaticResource Card}" Margin="0,4,0,0">
+                        <Border Style="{StaticResource Card}" Padding="12" Margin="0,3,0,0">
                             <StackPanel>
                                 <Grid>
                                     <Grid.ColumnDefinitions>
@@ -250,15 +260,15 @@
                                   compared down the card.
                                 -->
                                 <views:PullSourcePicker x:Name="PullPicker" Columns="1"
-                                                        Margin="0,10,0,0" />
+                                                        Margin="0,8,0,0" />
                             </StackPanel>
                         </Border>
 
-                        <Border Style="{StaticResource Card}" Margin="0,12,0,0">
+                        <Border Style="{StaticResource Card}" Padding="12" Margin="0,10,0,0">
                             <StackPanel>
                                 <TextBlock Text="账本概况" Style="{StaticResource SectionTitle}" />
                                 <TextBlock x:Name="LedgerSummaryText" FontSize="12" Foreground="#7E7268"
-                                           Margin="0,8,0,0" TextWrapping="Wrap" />
+                                           Margin="0,6,0,0" TextWrapping="Wrap" />
                             </StackPanel>
                         </Border>
                     </StackPanel>

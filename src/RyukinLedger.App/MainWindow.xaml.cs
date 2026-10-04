@@ -48,6 +48,12 @@ public partial class MainWindow : Window
     private bool _exitRequested;
     private bool _balloonShown;
 
+    // The chart's income/expense hues, taken a step darker.  As 10px bars they
+    // are fine; as 12px text on a card that lets the artwork through they land
+    // near 3:1, and a total nobody can read at a glance is not a summary.
+    private const string IncomeFigureColor = "#2F7F63";
+    private const string ExpenseFigureColor = "#B8453A";
+
     public MainWindow()
     {
         InitializeComponent();
@@ -204,6 +210,11 @@ public partial class MainWindow : Window
     {
         foreach (Currency currency in Currencies.All)
         {
+            // The vertical rhythm of this card is deliberately tight: six of them
+            // in three rows have to fit the resource column at the default window
+            // height without a scroll bar.  Every number here is multiplied by
+            // three -- 2px per card is 6px per row is 18px per column -- so the
+            // amounts that look like rounding are the ones holding the fit.
             var header = new StackPanel { Orientation = Orientation.Horizontal };
 
             // The real in-game icon when the artwork is present, a plain coloured
@@ -214,8 +225,8 @@ public partial class MainWindow : Window
                 var iconImage = new Image
                 {
                     Source = icon,
-                    Width = 28,
-                    Height = 28,
+                    Width = 24,
+                    Height = 24,
                     Stretch = Stretch.Uniform,
                     VerticalAlignment = VerticalAlignment.Center,
                     Margin = new Thickness(0, 0, 9, 0),
@@ -252,33 +263,53 @@ public partial class MainWindow : Window
             var balance = new TextBlock
             {
                 Text = "—",
-                FontSize = 20,
+                FontSize = 19,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = Brush("#2B2521"),
-                Margin = new Thickness(0, 6, 0, 0),
+                Margin = new Thickness(0, 3, 0, 0),
             };
 
-            var today = new TextBlock
-            {
-                Text = "今日 —",
-                FontSize = 11.5,
-                Foreground = Brush("#A2968A"),
-                Margin = new Thickness(0, 4, 0, 0),
-                TextWrapping = TextWrapping.Wrap,
-            };
+            // Two rows, each naming the day it covers.
+            //
+            // The shared "今日" on the left (the previous shape) saved two glyphs
+            // and cost the second row its subject: 支 dangled under a label that
+            // belonged to the row above it, and the eye had to travel back left
+            // to find out what it was subtracting from.  Repeating the day is
+            // how a table does it -- every row says what it is.
+            //
+            // The three columns do the alignment work: the day column, the
+            // direction column, and a value column sized to the widest of the
+            // two numbers and right-aligned inside it, so 174,475 and 1,041,040
+            // end on the same edge and their digits line up by magnitude.
+            var todayGrid = new Grid { Margin = new Thickness(0, 3, 0, 0) };
+            todayGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            todayGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            todayGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            todayGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            todayGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            var todayIncome = TodayFigureValue(IncomeFigureColor, row: 0);
+            var todayExpense = TodayFigureValue(ExpenseFigureColor, row: 1);
+
+            todayGrid.Children.Add(TodayCell("今日", column: 0, row: 0, gap: 8));
+            todayGrid.Children.Add(TodayCell("今日", column: 0, row: 1, gap: 8));
+            todayGrid.Children.Add(TodayCell("收", column: 1, row: 0, gap: 5));
+            todayGrid.Children.Add(TodayCell("支", column: 1, row: 1, gap: 5));
+            todayGrid.Children.Add(todayIncome);
+            todayGrid.Children.Add(todayExpense);
 
             var stack = new StackPanel();
             stack.Children.Add(header);
             stack.Children.Add(balance);
-            stack.Children.Add(today);
+            stack.Children.Add(todayGrid);
 
             // The card *is* the chart selector: clicking it switches the chart on
             // the right, so there is no dropdown repeating the same six names.
             var card = new Border
             {
                 Style = (Style)FindResource("Card"),
-                Margin = new Thickness(0, 0, 6, 6),
-                Padding = new Thickness(11, 9, 11, 9),
+                Margin = new Thickness(0, 0, 6, 4),
+                Padding = new Thickness(11, 7, 11, 7),
                 Child = stack,
                 Cursor = Cursors.Hand,
                 Tag = currency,
@@ -288,8 +319,51 @@ public partial class MainWindow : Window
             card.MouseLeftButtonUp += OnCurrencyCardClick;
 
             CurrencyGrid.Children.Add(card);
-            _cards.Add(new CurrencyCard(currency, card, balance, today));
+            _cards.Add(new CurrencyCard(currency, card, balance, new TodayFigures(todayIncome, todayExpense)));
         }
+    }
+
+    /// <summary>
+    /// A muted label cell of a resource card's today block -- the day ("今日")
+    /// or the direction ("收" / "支").  The columns are what align them: every
+    /// day lands on one x, every direction on another.
+    /// </summary>
+    private static TextBlock TodayCell(string text, int column, int row, double gap)
+    {
+        var cell = new TextBlock
+        {
+            Text = text,
+            FontSize = 11,
+            Foreground = Brush("#A2968A"),
+            Margin = new Thickness(0, 0, gap, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        Grid.SetColumn(cell, column);
+        Grid.SetRow(cell, row);
+        return cell;
+    }
+
+    /// <summary>
+    /// One value line of a card's today block, in the given colour.  Right
+    /// aligned inside its column: a column of numbers is read by its right edge,
+    /// where the units are, not by its first digit.
+    /// </summary>
+    private static TextBlock TodayFigureValue(string color, int row)
+    {
+        var value = new TextBlock
+        {
+            Text = "—",
+            FontSize = 12,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = Brush(color),
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0),
+        };
+
+        Grid.SetColumn(value, 2);
+        Grid.SetRow(value, row);
+        return value;
     }
 
     /// <summary>Marks the selected card and names the currency in the chart header.</summary>
@@ -473,7 +547,8 @@ public partial class MainWindow : Window
                 : "—";
 
             CurrencyTotals totals = day is null ? new CurrencyTotals() : day.For(card.Currency);
-            card.Today.Text = $"今日　收 {DailyChart.Format(totals.Income)}　支 {DailyChart.Format(totals.Expense)}";
+            card.Today.Income.Text = DailyChart.Format(totals.Income);
+            card.Today.Expense.Text = DailyChart.Format(totals.Expense);
         }
 
         UpdatePullCard();
@@ -794,7 +869,10 @@ public partial class MainWindow : Window
         return brush;
     }
 
-    private sealed record CurrencyCard(Currency Currency, Border Container, TextBlock Balance, TextBlock Today);
+    private sealed record CurrencyCard(Currency Currency, Border Container, TextBlock Balance, TodayFigures Today);
+
+    /// <summary>The two value lines under a card's "今日" heading, always written together.</summary>
+    private sealed record TodayFigures(TextBlock Income, TextBlock Expense);
 
     private sealed record RangeChoice(string Label, int Days)
     {
