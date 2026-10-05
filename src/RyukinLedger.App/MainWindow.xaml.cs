@@ -48,6 +48,21 @@ public partial class MainWindow : Window
     private bool _exitRequested;
     private bool _balloonShown;
 
+    /// <summary>
+    /// When the core was first seen reporting "handshake done, waiting for game
+    /// data".  That state is a transition: the login snapshot lands within a
+    /// second of the first decoded command.  Sitting in it for half a minute
+    /// means the connection the core is holding stopped producing anything it
+    /// recognises, and the player is the only one who can fix that.  Timed here
+    /// rather than in the core because it is a statement about what the
+    /// interface says, not about the capture -- and because a clock must never
+    /// be allowed to touch the capture state.
+    /// </summary>
+    private DateTime? _waitingForDataSince;
+
+    /// <summary>How long that has to last before the interface explains it.</summary>
+    private static readonly TimeSpan StalledAfter = TimeSpan.FromSeconds(30);
+
     // The chart's income/expense hues, taken a step darker.  As 10px bars they
     // are fine; as 12px text on a card that lets the artwork through they land
     // near 3:1, and a total nobody can read at a glance is not a summary.
@@ -437,6 +452,17 @@ public partial class MainWindow : Window
         bool alive = _status is { IsAlive: true };
         CoreState? state = alive ? _status!.State : null;
 
+        // "Receiving" says a key was derived, not when.  The interface is the
+        // only place that can answer "for how long", so it does.
+        if (state == CoreState.Receiving)
+        {
+            _waitingForDataSince ??= DateTime.UtcNow;
+        }
+        else
+        {
+            _waitingForDataSince = null;
+        }
+
         StatusDot.Fill = state switch
         {
             CoreState.Tracking => Brush("#3E9E7E"),
@@ -477,6 +503,16 @@ public partial class MainWindow : Window
                 parts.Add(_status!.Reconnects > 0
                     ? "游戏内发生过断网重连，可能存在未被记录的数据；重进游戏（退回登录界面重新登录）会补齐差值。"
                     : "密钥要在登录握手时才能推导——如果是在进入游戏之后才启动的，请退到登录界面重新登录。");
+            }
+            else if (state == CoreState.Receiving &&
+                _waitingForDataSince is { } since &&
+                DateTime.UtcNow - since > StalledAfter)
+            {
+                // Commands decoded, but nothing the core understands followed.
+                // The core drops a connection whose packets stop decoding on
+                // its own, so this lasting means the game has gone quiet or its
+                // data no longer looks like what the pinned decoder expects.
+                parts.Add("解出命令后一直没等到真实数据；如果游戏内断过网，请退回登录界面重新登录。");
             }
 
             if (_status!.Nickname is { Length: > 0 } nickname)

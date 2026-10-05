@@ -22,9 +22,13 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 mod admin;
 mod capture;
+mod decoder_log;
 mod ledger;
 mod monitor;
 mod process;
@@ -128,10 +132,14 @@ fn tracing_init(data_dir: &std::path::Path, verbose: bool) -> Result<()> {
         Err(_) => "warn,irminsul=info".to_string(),
     };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(filter))
-        .with_writer(non_blocking)
-        .with_ansi(false)
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(non_blocking)
+                .with_ansi(false)
+                .with_filter(EnvFilter::new(filter))
+                .with_filter(decoder_log::DropLostSearches),
+        )
         .init();
 
     tracing::info!("irminsul {} starting, logging to {}", env!("CARGO_PKG_VERSION"), log_dir.display());

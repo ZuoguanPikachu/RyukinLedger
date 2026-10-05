@@ -37,6 +37,30 @@ const PLAYER_STORE_NOTIFY: u16 = 22160;
 /// that none arrived.  The real one lands milliseconds after login.
 const STORE_SYNC_GRACE: Duration = Duration::from_secs(30);
 
+/// How many packets the decoder may fail to decrypt, without decoding anything
+/// in between, before the connection state is thrown away.
+///
+/// A packet that does not fit the key is the decoder's own verdict, and the only
+/// one worth acting on: it is reported per packet that really was undecryptable,
+/// which is what "a packet produced no command" is not -- acknowledgements,
+/// duplicates and segments the KCP receive window refuses all produce that empty
+/// batch too, and treating them as failure once dropped a healthy connection
+/// in the middle of a login.
+///
+/// Two very different situations arrive here, and both are hopeless until the
+/// player logs in again.  A session key that no longer fits: the decoder pays for
+/// a brute-force search over the seeds of the session it remembers on every
+/// following packet -- 3000 candidate seeds, five keys each -- which was 2835
+/// searches over 14 minutes in the run that prompted this.  And a connection
+/// whose key material was never obtained at all, where nothing is searched
+/// because there is nothing to search: the core was started under an established
+/// session, or an in-game reconnect left it holding traffic it cannot read.
+///
+/// A working connection produces none of either -- a login decodes its first
+/// packet with the key it just derived -- so thirty is far above anything
+/// healthy, and small enough to stop the waste within seconds.
+const UNREADABLE_LIMIT: u64 = 30;
+
 pub struct Monitor {
     data_dir: PathBuf,
     /// Directory the app writes to; this process only reads `stop.request` from
@@ -62,6 +86,27 @@ pub struct Monitor {
     /// Real game data has arrived during this run.  Balances seeded from the
     /// ledger must not be mistaken for live capture.
     session_data: bool,
+    /// A command has been decoded at some point during this connection, and the
+    /// connection state has not been dropped since.  Only a connection that has
+    /// proved it could decode is worth giving up on; one that never decoded
+    /// anything has simply not started yet.
+    decoded_a_command: bool,
+    /// Packets the decoder has failed to decrypt since the last command it
+    /// decoded.  See `UNREADABLE_LIMIT`.
+    unreadable: u64,
+    /// Of those, how many also cost a brute-force search over the seeds.  Kept
+    /// apart from the total because the difference is the diagnosis: no searches
+    /// at all means the key material was never obtained.
+    lost_searches: u64,
+    /// The values `decoder_log` had when they were last read, which is what turns
+    /// its running totals into "how many since the last packet".
+    unreadable_seen: u64,
+    lost_searches_seen: u64,
+    /// When the first command of this connection decoded, used to time the
+    /// check for a login that never produced any game data.
+    first_command_at: Option<Instant>,
+    /// The stalled-login warning has been emitted for this connection.
+    stall_reported: bool,
     /// How often the game's connection was replaced after this run had already
     /// been recording.  Anything that happened in those windows could not be
     /// recorded, so the interface explains it instead of leaving the player
@@ -115,6 +160,13 @@ impl Monitor {
             error: None,
             handshake: false,
             session_data: false,
+            decoded_a_command: false,
+            unreadable: 0,
+            lost_searches: 0,
+            unreadable_seen: 0,
+            lost_searches_seen: 0,
+            first_command_at: None,
+            stall_reported: false,
             reconnects: 0,
             first_data_at: None,
             store_sync_seen: false,
@@ -174,6 +226,7 @@ impl Monitor {
                     // The heartbeat is also the only place a *missing* packet can
                     // be noticed: nothing arrives to trigger it.
                     self.report_missing_store_sync();
+                    self.report_stalled_login();
                     // Heartbeat: also proves to the app that we are alive.
                     self.publish()?;
                     continue;
@@ -226,6 +279,11 @@ impl Monitor {
             return Ok(());
         };
 
+        // Read after the decoder has run: what it could not read on this packet
+        // is part of the totals by now, because they are counted while its
+        // complaints are on their way to the log.
+        let unreadable = self.count_unreadable();
+
         match parsed {
             GamePacket::Connection(ConnectionPacket::HandshakeRequested) => {
                 // The sniffer has dropped its keys: the player is logging in
@@ -264,9 +322,18 @@ impl Monitor {
             }
             GamePacket::Connection(_) => {}
             GamePacket::Commands(commands) => {
-                if !commands.is_empty() {
-                    self.handshake = true;
+                if commands.is_empty() {
+                    // Nothing decoded.  On its own that says nothing -- see
+                    // `UNREADABLE_LIMIT` -- so the only thing counted here is
+                    // what the decoder itself reported failing on.
+                    self.note_unreadable(unreadable)?;
+                    return Ok(());
                 }
+
+                // A command decoded, so the key fits this connection again.
+                self.unreadable = 0;
+                self.lost_searches = 0;
+                self.handshake = true;
                 for command in &commands {
                     self.handle_command(command)?;
                 }
@@ -288,6 +355,62 @@ impl Monitor {
         }
     }
 
+    /// Give up on a connection the decoder can no longer read.
+    ///
+    /// The decoder keeps its session key, its seeds and its KCP receive window
+    /// inside itself, and it repairs a key that no longer fits by searching the
+    /// seeds of the session it remembers.  That search cannot succeed once the
+    /// game has moved on, and it is not cheap: 3000 candidate seeds, five keys
+    /// each, for every seed, on *every* following packet.  A connection like
+    /// that, or one whose key material was never obtained in the first place, is
+    /// not coming back on its own -- only a fresh login brings the packet that
+    /// carries the seeds.
+    ///
+    /// Dropping the state is what makes that login work.  It leaves the decoder
+    /// exactly as a restarted core leaves it, so the next login decodes the way
+    /// it does after a restart.  With the seeds gone there is nothing left to
+    /// search either, so the packets still arriving on the dead connection cost
+    /// nothing until then -- and the interface stops claiming to be waiting for
+    /// data it can never read.
+    fn note_unreadable(&mut self, unreadable: u64) -> Result<()> {
+        // Nothing has ever decoded: there is no key to give up on, and the
+        // packets of a login that has not reached its first command yet must not
+        // throw away a state that is about to be used.
+        if !self.decoded_a_command {
+            return Ok(());
+        }
+
+        self.unreadable += unreadable;
+        if self.unreadable < UNREADABLE_LIMIT {
+            return Ok(());
+        }
+
+        tracing::warn!(
+            "the decoder could not read {UNREADABLE_LIMIT} packets in a row ({lost} of them cost a \
+             search over the seeds) without decoding anything; the connection state is dropped.  \
+             A new login is needed to record again",
+            lost = self.lost_searches
+        );
+        self.note_reconnect();
+        self.reset_capture_state();
+        self.decoded_a_command = false;
+        self.publish()
+    }
+
+    /// How many packets the decoder has failed to decrypt since the last packet
+    /// this run looked at, and how many of those cost a search over the seeds.
+    fn count_unreadable(&mut self) -> u64 {
+        let packets = crate::decoder_log::unreadable_packets();
+        let searches = crate::decoder_log::lost_searches();
+
+        let unreadable = packets.saturating_sub(self.unreadable_seen);
+        self.lost_searches += searches.saturating_sub(self.lost_searches_seen);
+
+        self.unreadable_seen = packets;
+        self.lost_searches_seen = searches;
+        unreadable
+    }
+
     /// Forget what the run knows about the connection that just ended.
     ///
     /// These flags all describe a live connection: whether handshake traffic has
@@ -297,6 +420,10 @@ impl Monitor {
     fn forget_connection_progress(&mut self) {
         self.handshake = false;
         self.session_data = false;
+        self.unreadable = 0;
+        self.lost_searches = 0;
+        self.first_command_at = None;
+        self.stall_reported = false;
         self.first_data_at = None;
         self.store_sync_seen = false;
         self.missing_store_reported = false;
@@ -314,6 +441,14 @@ impl Monitor {
     }
 
     fn handle_command(&mut self, command: &GameCommand) -> Result<()> {
+        // A command that decoded proves the session key fits this connection,
+        // which is what makes a later run of lost searches mean the connection
+        // has ended rather than not yet started.
+        self.decoded_a_command = true;
+        self.unreadable = 0;
+        self.lost_searches = 0;
+        self.first_command_at.get_or_insert_with(Instant::now);
+
         *self.commands_seen.entry(command.command_id).or_insert(0) += 1;
 
         // The store sync is recognised by its command id, and its items are read
@@ -397,20 +532,65 @@ impl Monitor {
 
         self.missing_store_reported = true;
 
-        let mut counts: Vec<(u16, u64)> = self.commands_seen.iter().map(|(id, n)| (*id, *n)).collect();
-        counts.sort_by(|a, b| b.1.cmp(&a.1));
-        let histogram = counts
-            .iter()
-            .take(20)
-            .map(|(id, n)| format!("{id}x{n}"))
-            .collect::<Vec<_>>()
-            .join(" ");
+        let histogram = self.command_histogram();
 
         tracing::warn!(
             "no store sync (command {PLAYER_STORE_NOTIFY}) seen in {}s; item balances cannot be \
              known.  Commands seen: {histogram}",
             STORE_SYNC_GRACE.as_secs()
         );
+    }
+
+    /// Say so, once, when the decoder reads commands but no game data follows.
+    ///
+    /// This is the one state the run cannot otherwise describe.  "Handshake
+    /// done, waiting for game data" on the interface means exactly one thing --
+    /// a command decoded -- and says nothing about why nothing did afterwards,
+    /// which is the difference between a login that never finished, a login
+    /// whose key could not be derived, and a decoder that no longer recognises
+    /// the game's packets at all.  The command ids tell those apart: a game
+    /// update that moves one shows up here as the new id sitting in the list.
+    ///
+    /// Deliberately only logged: a clock may decide what to *say*, never what to
+    /// throw away.
+    fn report_stalled_login(&mut self) {
+        if self.session_data || self.stall_reported {
+            return;
+        }
+
+        let Some(first) = self.first_command_at else {
+            return;
+        };
+
+        if first.elapsed() < STORE_SYNC_GRACE {
+            return;
+        }
+
+        self.stall_reported = true;
+
+        let decoded: u64 = self.commands_seen.values().sum();
+        let histogram = self.command_histogram();
+
+        tracing::warn!(
+            "no game data {}s after the first decoded command; {decoded} command(s) decoded, \
+             none of them recognised.  Commands seen: {histogram}.  A login that never reached \
+             the game, or a key that could not be derived, looks like this -- the interface says \
+             it is waiting for game data either way",
+            first.elapsed().as_secs()
+        );
+    }
+
+    /// `id x count` for the commands this connection has decoded, most frequent
+    /// first.  What makes a "nothing was recognised" warning actionable.
+    fn command_histogram(&self) -> String {
+        let mut counts: Vec<(u16, u64)> = self.commands_seen.iter().map(|(id, n)| (*id, *n)).collect();
+        counts.sort_by(|a, b| b.1.cmp(&a.1));
+        counts
+            .iter()
+            .take(20)
+            .map(|(id, n)| format!("{id}x{n}"))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// Write a batch of balance changes to the ledger.
@@ -918,6 +1098,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&control);
     }
 
+    /// A login that decodes commands and then produces no game data is the one
+    /// state the run cannot otherwise describe, so it says so -- once, and with
+    /// the command ids, because that list is what tells "the login never
+    /// finished" apart from "the decoder no longer recognises the packets".
+    #[test]
+    fn a_login_that_produces_no_game_data_says_so() {
+        let dir = temp_dir("stalled-login");
+        let mut monitor = Monitor::new(&dir, None, None, None).unwrap();
+        monitor.publish().unwrap();
+
+        // Nothing decoded yet: there is nothing to be stalled after.
+        monitor.report_stalled_login();
+        assert!(!monitor.stall_reported);
+
+        // A command that is not game data at all -- what the interface calls
+        // "waiting for game data".
+        monitor.handle_command(&command(4_001, vec![0x45, 0x67, 0x89, 0xab])).unwrap();
+
+        monitor.report_stalled_login();
+        assert!(!monitor.stall_reported, "a moment later is not a stall");
+
+        // Long enough, and it is said.
+        monitor.first_command_at = Some(Instant::now() - STORE_SYNC_GRACE - Duration::from_secs(1));
+        monitor.report_stalled_login();
+        assert!(monitor.stall_reported);
+
+        // A run that is recording is never stalled, however long it took to get
+        // there: a snapshot that changes nothing still counts as having arrived.
+        monitor.handle_command(&command(4_002, login_payload(1_000, 500, 0))).unwrap();
+        assert_eq!(read_status(&dir)["state"], "tracking");
+        monitor.stall_reported = false;
+        monitor.report_stalled_login();
+        assert!(!monitor.stall_reported);
+
+        // And a new connection starts over.
+        monitor.handle_packet(connection_packet(0xFF)).unwrap();
+        assert!(!monitor.stall_reported);
+        assert!(monitor.first_command_at.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Balances recovered from the ledger are not "capture in progress": a run
     /// that has seen no game data still reports that it is waiting.
     #[test]
@@ -1097,5 +1319,122 @@ mod tests {
         assert_eq!(read_status(&dir)["reconnects"], 2);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A connection the decoder cannot read is not "still recording": it is the
+    /// state in which every following packet is either paid for with another
+    /// brute-force search over the seeds of a session that has ended, or -- when
+    /// no seeds were ever obtained -- silently dropped.  The state goes instead,
+    /// and the run waits for a login, which is what actually recovers.
+    #[test]
+    fn a_connection_the_decoder_cannot_read_is_dropped() {
+        let dir = temp_dir("unreadable");
+        let mut monitor = Monitor::new(&dir, None, None, None).unwrap();
+        monitor.handle_command(&command(4_001, login_payload(1_000, 500, 0))).unwrap();
+        assert_eq!(read_status(&dir)["state"], "tracking");
+
+        // A few unreadable packets are the normal price of a session whose seeds
+        // are not known yet.
+        monitor.note_unreadable(UNREADABLE_LIMIT - 1).unwrap();
+        assert_eq!(read_status(&dir)["state"], "tracking", "a few must not drop the key");
+
+        // A command that decodes clears the count, because the key fits again.
+        monitor.handle_command(&command(4_002, login_payload(1_000, 500, 0))).unwrap();
+        monitor.note_unreadable(UNREADABLE_LIMIT - 1).unwrap();
+        assert_eq!(read_status(&dir)["state"], "tracking");
+
+        // Without one in between, the count keeps adding up and the state goes.
+        monitor.note_unreadable(1).unwrap();
+
+        let status = read_status(&dir);
+        assert_eq!(status["state"], "waiting_for_handshake");
+        assert_eq!(status["session_data"], false);
+        assert_eq!(status["reconnects"], 1, "the connection the player was using ended");
+        assert_eq!(status["balances"]["primogems"], 1_000, "the ledger is not the connection");
+
+        // Having given up, it does not give up again and again while the dead
+        // connection keeps sending.
+        monitor.note_unreadable(UNREADABLE_LIMIT * 10).unwrap();
+        assert_eq!(read_status(&dir)["reconnects"], 1);
+
+        // And the next login decodes exactly as it does after a restart.
+        monitor.handle_command(&command(4_003, login_payload(1_600, 500, 0))).unwrap();
+        assert_eq!(read_status(&dir)["state"], "tracking");
+        let records = ledger_lines(&dir);
+        assert_eq!(records.iter().filter(|r| r["kind"] == "gap").count(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The case a counts-only-searches rule missed, and the run that exposed it:
+    /// a connection whose key material was never obtained has nothing to search,
+    /// so it fails silently and by the packet.  It is just as unreadable, and
+    /// leaving the interface claiming to wait for game data is worse than saying
+    /// that a new login is needed.
+    #[test]
+    fn a_connection_with_no_key_material_at_all_is_dropped() {
+        let dir = temp_dir("unreadable-no-seeds");
+        let mut monitor = Monitor::new(&dir, None, None, None).unwrap();
+        monitor.handle_command(&command(4_001, login_payload(1_000, 500, 0))).unwrap();
+
+        // Every packet fails, none of them costs a search: no seeds were known.
+        monitor.note_unreadable(UNREADABLE_LIMIT).unwrap();
+        assert_eq!(monitor.lost_searches, 0, "nothing was searched for");
+
+        let status = read_status(&dir);
+        assert_eq!(status["state"], "waiting_for_handshake");
+        assert_eq!(status["reconnects"], 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Before anything has ever decoded there is nothing to give up on: the
+    /// packets of a login that has not reached its first command yet must not
+    /// throw away a state that is about to be used.
+    #[test]
+    fn packets_the_decoder_cannot_read_before_it_decoded_anything_do_not_give_up() {
+        let dir = temp_dir("unreadable-early");
+        let mut monitor = Monitor::new(&dir, None, None, None).unwrap();
+        monitor.publish().unwrap();
+
+        monitor.note_unreadable(UNREADABLE_LIMIT * 10).unwrap();
+
+        let status = read_status(&dir);
+        assert_eq!(status["state"], "waiting_for_handshake");
+        assert_eq!(status["reconnects"], 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The trap that cost a debugging round, pinned down here: the decoder
+    /// answers a datagram carrying nothing but acknowledgements with an empty
+    /// command batch -- the very same answer it gives for a packet it cannot
+    /// decrypt.  Reading "no commands" as "the key is wrong" therefore drops a
+    /// healthy connection as soon as acknowledgements arrive in a run, and a
+    /// login burst produces exactly that.
+    #[test]
+    fn acknowledgement_only_traffic_decodes_to_nothing() {
+        let mut sniffer = GameSniffer::new();
+
+        // A KCP acknowledgement, in the shape the game sends: the conversation
+        // id, four bytes it inserts, the rest of the header, four more bytes,
+        // and no payload.
+        let mut segment = Vec::new();
+        segment.extend_from_slice(&7u32.to_le_bytes()); // conversation
+        segment.extend_from_slice(&[0, 0, 0, 0]); // the game's inserted bytes
+        segment.push(82); // IKCP_CMD_ACK
+        segment.push(0); // fragment
+        segment.extend_from_slice(&128u16.to_le_bytes()); // window
+        segment.extend_from_slice(&0u32.to_le_bytes()); // timestamp
+        segment.extend_from_slice(&1u32.to_le_bytes()); // sequence number
+        segment.extend_from_slice(&0u32.to_le_bytes()); // unacknowledged
+        segment.extend_from_slice(&0u32.to_le_bytes()); // payload length
+        segment.extend_from_slice(&[0, 0, 0, 0]); // the game's, before the payload
+
+        let parsed = sniffer.receive_packet(udp_frame(crate::capture::PORT_RANGE.0, 40_000, &segment));
+        assert!(
+            matches!(parsed, Some(GamePacket::Commands(ref commands)) if commands.is_empty()),
+            "an acknowledgement must decode to nothing, not to a verdict about the key"
+        );
     }
 }
