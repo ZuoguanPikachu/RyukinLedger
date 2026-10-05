@@ -56,6 +56,15 @@ public sealed class StatusSnapshot
     /// <summary>Whether *this* run has received game data -- not whether the ledger has any.</summary>
     public bool SessionData { get; init; }
 
+    /// <summary>
+    /// How often the connection was replaced after this run had already been
+    /// recording: an in-game disconnect and reconnect (or the game being closed
+    /// and started again).  Data from those windows cannot be recorded, so the
+    /// interface says so rather than leaving the player to guess why the core is
+    /// waiting for a handshake they already did.
+    /// </summary>
+    public long Reconnects { get; init; }
+
     public bool GameRunning { get; init; }
     public long Transactions { get; init; }
 
@@ -125,6 +134,7 @@ public sealed class StatusSnapshot
                 Balances = balances,
                 Complete = GetBool(root, "complete"),
                 SessionData = GetBool(root, "session_data"),
+                Reconnects = GetInt64(root, "reconnects") ?? 0,
                 GameRunning = GetBool(root, "game_running"),
                 Transactions = GetInt64(root, "transactions") ?? 0,
             };

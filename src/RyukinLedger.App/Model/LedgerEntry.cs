@@ -15,7 +15,12 @@ public enum LedgerKind
     /// <summary>A change observed live: exactly one action, so the direction is real.</summary>
     Tx,
 
-    /// <summary>A change that happened while the core was not capturing.</summary>
+    /// <summary>
+    /// A change that happened while the core was not capturing: a disconnect /
+    /// reconnect, or the core not being run at all.  It is the net change of
+    /// that whole window, so it cannot be split into actions -- but it does move
+    /// the balance, so it is counted into the day's income/expense by its sign.
+    /// </summary>
     Gap,
 }
 

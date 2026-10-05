@@ -10,8 +10,12 @@ public sealed class CurrencyTotals
     public long Expense { get; set; }
 
     /// <summary>
-    /// Net change recorded as <c>gap</c>: it happened while the core was not
-    /// capturing, so it is kept out of the income/expense totals on purpose.
+    /// Signed net change recorded as <c>gap</c>.  It happened over a window the
+    /// core did not capture -- a disconnect/reconnect, or the core not running
+    /// at all -- so it cannot be split into actions the way a live push can.
+    /// Its amount is nevertheless part of <see cref="Income"/> / <see cref="Expense"/>
+    /// (by sign); this field keeps the unattributed part visible so the
+    /// interface can say how much of those totals came from such a window.
     /// </summary>
     public long Gap { get; set; }
 
@@ -263,23 +267,26 @@ public sealed class LedgerStore
 
                 if (entry.Kind == LedgerKind.Gap)
                 {
+                    // The net change of an uncaptured window.  It cannot be
+                    // split into actions, but it does move the balance, so it
+                    // counts towards the day's totals by its sign -- leaving it
+                    // out would make a day that clearly gained 42,300 mora look
+                    // as though nothing happened.  Gap keeps it identifiable.
                     totals.Gap += delta;
                 }
-                else
+
+                // Income and expense are stored as separate signed events by
+                // the core; keep them separate here too, so a day that both
+                // earned and spent 160 shows 160/160 rather than zero.
+                if (delta > 0)
                 {
-                    // Income and expense are stored as separate signed events by
-                    // the core; keep them separate here too, so a day that both
-                    // earned and spent 160 shows 160/160 rather than zero.
-                    if (delta > 0)
-                    {
-                        totals.Income += delta;
-                        TransactionCount++;
-                    }
-                    else if (delta < 0)
-                    {
-                        totals.Expense += -delta;
-                        TransactionCount++;
-                    }
+                    totals.Income += delta;
+                    TransactionCount++;
+                }
+                else if (delta < 0)
+                {
+                    totals.Expense += -delta;
+                    TransactionCount++;
                 }
 
                 _recent.Enqueue(new LedgerRow

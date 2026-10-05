@@ -47,6 +47,10 @@ pub struct Monitor {
     session: Option<String>,
     /// The app's process id: when it is gone, so is the reason to keep running.
     watch_pid: Option<u32>,
+    /// The dispatch (version) keys, kept out here because the sniffer has to be
+    /// rebuilt from scratch when a connection ends -- the session key and the
+    /// KCP receive state live inside it, and there is no API to clear them.
+    keys: HashMap<u16, Vec<u8>>,
     sniffer: GameSniffer,
     tracker: BalanceTracker,
     ledger: Ledger,
@@ -58,6 +62,11 @@ pub struct Monitor {
     /// Real game data has arrived during this run.  Balances seeded from the
     /// ledger must not be mistaken for live capture.
     session_data: bool,
+    /// How often the game's connection was replaced after this run had already
+    /// been recording.  Anything that happened in those windows could not be
+    /// recorded, so the interface explains it instead of leaving the player
+    /// wondering why the core asks them to log in when they already have.
+    reconnects: u64,
     /// When the first game data of this run arrived, used to time the check for
     /// a missing store sync.
     first_data_at: Option<Instant>,
@@ -97,6 +106,7 @@ impl Monitor {
             control_dir,
             session,
             watch_pid,
+            keys: keys.clone(),
             sniffer: GameSniffer::new().set_initial_keys(keys),
             tracker: BalanceTracker::new(known),
             ledger,
@@ -105,6 +115,7 @@ impl Monitor {
             error: None,
             handshake: false,
             session_data: false,
+            reconnects: 0,
             first_data_at: None,
             store_sync_seen: false,
             missing_store_reported: false,
@@ -219,9 +230,37 @@ impl Monitor {
             GamePacket::Connection(ConnectionPacket::HandshakeRequested) => {
                 // The sniffer has dropped its keys: the player is logging in
                 // again, and a fresh session key will be derived.  The known
-                // balances stay valid, so no data is lost here.
+                // balances stay valid, so no data is lost here.  What does
+                // describe the old connection is the bookkeeping below, so that
+                // is cleared: the next data belongs to a new login.
                 tracing::info!("handshake requested; deriving a new session key");
-                self.handshake = false;
+                self.note_reconnect();
+                self.forget_connection_progress();
+                self.publish()?;
+            }
+            GamePacket::Connection(ConnectionPacket::Disconnected) => {
+                // The one signal the game gives that a connection is over, and
+                // the only one that does not depend on the next login being
+                // decoded to be noticed.  Upstream clears its state for a new
+                // handshake and nothing else, so a session that ends without one
+                // (the game was closed and started again) leaves the old session
+                // key, its seeds and a KCP receive window behind -- all of them
+                // describing a connection that no longer exists.
+                //
+                // What follows is not a clean failure.  Every packet of the next
+                // login is decrypted with the wrong key and then spent on a
+                // brute-force search over the *previous* session's seeds, which
+                // takes ~200 ms per attempt and cannot succeed; the one packet
+                // that could repair that state -- the new session's seed packet
+                // -- arrives once, in the middle of the login burst, and is
+                // easily lost while the core is busy.  From the outside the run
+                // then looks like "recording" with nothing recorded, until the
+                // core is restarted.  Dropping the state here makes the next
+                // login decode exactly as it does after a restart.
+                tracing::warn!("the game's connection ended; dropping the session key and the capture state");
+                self.note_reconnect();
+                self.reset_capture_state();
+                self.publish()?;
             }
             GamePacket::Connection(_) => {}
             GamePacket::Commands(commands) => {
@@ -234,6 +273,44 @@ impl Monitor {
             }
         }
         Ok(())
+    }
+
+    /// Count a connection that ended while this run was recording.
+    ///
+    /// The first login of a run is not a reconnect: nothing had been recorded
+    /// yet, so nothing can have been missed.  Counting it only while data is
+    /// there also collapses the bursts the game sends -- four 404s and five
+    /// handshake packets can arrive in the same millisecond -- into one event,
+    /// because the first one clears the flag.
+    fn note_reconnect(&mut self) {
+        if self.session_data {
+            self.reconnects += 1;
+        }
+    }
+
+    /// Forget what the run knows about the connection that just ended.
+    ///
+    /// These flags all describe a live connection: whether handshake traffic has
+    /// been decoded, whether real game data has arrived, and the bookkeeping
+    /// that decides when to complain about a missing store sync.  The balances
+    /// are *not* part of this -- they belong to the ledger and survive.
+    fn forget_connection_progress(&mut self) {
+        self.handshake = false;
+        self.session_data = false;
+        self.first_data_at = None;
+        self.store_sync_seen = false;
+        self.missing_store_reported = false;
+    }
+
+    /// Put the capture back into the state a freshly started process is in.
+    ///
+    /// Rebuilding the sniffer is the only way to get there: the session key and
+    /// the KCP state live inside it, and it exposes no way to clear them.  This
+    /// is what lets "close the game, start it again" recover without restarting
+    /// the core -- it does exactly what the restart was doing by accident.
+    fn reset_capture_state(&mut self) {
+        self.sniffer = GameSniffer::new().set_initial_keys(self.keys.clone());
+        self.forget_connection_progress();
     }
 
     fn handle_command(&mut self, command: &GameCommand) -> Result<()> {
@@ -399,6 +476,7 @@ impl Monitor {
                 .collect(),
             complete: self.tracker.is_complete(),
             session_data: self.session_data,
+            reconnects: self.reconnects,
             game_running: crate::process::game_running(),
             transactions: self.ledger.transactions(),
         }
@@ -445,6 +523,47 @@ mod tests {
             data_len: proto_data.len() as u32,
             proto_data,
         }
+    }
+
+    /// A raw Ethernet/IPv4/UDP frame, in the shape the capture backend hands
+    /// over.
+    ///
+    /// Connection events carry no protobuf and are recognised before the KCP
+    /// layer, so they cannot be tested by calling `handle_command` -- the only
+    /// way in is a whole packet.
+    fn udp_frame(src_port: u16, dst_port: u16, payload: &[u8]) -> Vec<u8> {
+        let udp_len = 8 + payload.len();
+        let ip_len = 20 + udp_len;
+
+        let mut frame = Vec::with_capacity(14 + ip_len);
+        // Ethernet: destination, source, ethertype IPv4.
+        frame.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x01]);
+        frame.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x02]);
+        frame.extend_from_slice(&[0x08, 0x00]);
+        // IPv4: version 4, five 32-bit words, total length, protocol 17 (UDP).
+        frame.push(0x45);
+        frame.push(0x00);
+        frame.extend_from_slice(&(ip_len as u16).to_be_bytes());
+        frame.extend_from_slice(&[0x00, 0x00]); // identification
+        frame.extend_from_slice(&[0x40, 0x00]); // don't fragment
+        frame.push(64); // ttl
+        frame.push(17); // UDP
+        frame.extend_from_slice(&[0x00, 0x00]); // header checksum, not verified
+        frame.extend_from_slice(&[10, 0, 0, 1]); // source address
+        frame.extend_from_slice(&[10, 0, 0, 2]); // destination address
+        // UDP: ports, length, checksum 0 ("none").
+        frame.extend_from_slice(&src_port.to_be_bytes());
+        frame.extend_from_slice(&dst_port.to_be_bytes());
+        frame.extend_from_slice(&(udp_len as u16).to_be_bytes());
+        frame.extend_from_slice(&[0x00, 0x00]);
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    /// The game's connection-level packets: a 20-byte-or-shorter UDP payload
+    /// whose first four bytes are the code.
+    fn connection_packet(code: u32) -> Vec<u8> {
+        udp_frame(crate::capture::PORT_RANGE.0, 40_000, &code.to_be_bytes())
     }
 
     fn read_status(dir: &Path) -> serde_json::Value {
@@ -855,6 +974,127 @@ mod tests {
         assert_eq!(ledger_lines(&dir).len(), before, "noise must not write ledger records");
         let status = read_status(&dir);
         assert_eq!(status["balances"]["primogems"], 10, "balances must be unchanged");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `disconnected packet` is the one signal the game gives that a connection
+    /// is over, and it used to be thrown away: the session key, its seeds and the
+    /// KCP receive state stayed behind, describing a connection that no longer
+    /// existed.  Every packet of the next login was then decrypted with the wrong
+    /// key and spent on a brute-force search that could not succeed, so the core
+    /// kept reporting "recording" while recording nothing, and only restarting it
+    /// helped.  The event now resets that state, and says so in the log.
+    #[test]
+    fn a_disconnected_packet_resets_the_capture_state() {
+        let dir = temp_dir("disconnected");
+        let mut monitor = Monitor::new(&dir, None, None, None).unwrap();
+
+        // A session that is up and running.
+        monitor.handle_command(&command(4_001, login_payload(1_000, 500, 0))).unwrap();
+        let status = read_status(&dir);
+        assert_eq!(status["state"], "tracking");
+        assert_eq!(status["session_data"], true);
+
+        // The game closes the connection.
+        monitor.handle_packet(connection_packet(404)).unwrap();
+
+        // The key is gone, so "recording" would be a lie -- and the balances,
+        // which belong to the ledger rather than to the connection, survive.
+        let status = read_status(&dir);
+        assert_eq!(status["state"], "waiting_for_handshake");
+        assert_eq!(status["session_data"], false);
+        assert_eq!(status["balances"]["primogems"], 1_000);
+
+        // The next login is a new connection: its snapshot is compared against
+        // what the ledger already knows, so a change made in between is a gap
+        // and not income.
+        monitor.handle_command(&command(4_002, login_payload(1_600, 500, 0))).unwrap();
+
+        let records = ledger_lines(&dir);
+        let gaps: Vec<&serde_json::Value> = records.iter().filter(|r| r["kind"] == "gap").collect();
+        assert_eq!(gaps.len(), 1, "expected exactly one gap: {records:#?}");
+        assert_eq!(gaps[0]["currency"], "primogems");
+        assert_eq!(gaps[0]["delta"], 600);
+        assert_eq!(
+            records.iter().filter(|r| r["kind"] == "tx").count(),
+            0,
+            "a gap must not be recorded as income"
+        );
+        assert_eq!(read_status(&dir)["state"], "tracking");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A new handshake means the player is logging in again, so the run is
+    /// waiting for a key once more -- not still "tracking" the connection that
+    /// just ended.
+    #[test]
+    fn a_new_handshake_makes_the_run_wait_again() {
+        let dir = temp_dir("rehandshake");
+        let mut monitor = Monitor::new(&dir, None, None, None).unwrap();
+        monitor.handle_command(&command(4_001, login_payload(1_000, 500, 0))).unwrap();
+        assert_eq!(read_status(&dir)["state"], "tracking");
+
+        monitor.handle_packet(connection_packet(0xFF)).unwrap();
+
+        let status = read_status(&dir);
+        assert_eq!(status["state"], "waiting_for_handshake");
+        assert_eq!(status["session_data"], false);
+        assert_eq!(status["balances"]["primogems"], 1_000, "the ledger's balances stay");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A connection event must not disturb whatever else is running: the relay
+    /// of these packets is a burst (five arrived at once in the log that
+    /// prompted this), and each one has to leave the ledger alone.
+    #[test]
+    fn a_burst_of_disconnects_writes_nothing_to_the_ledger() {
+        let dir = temp_dir("disconnect-burst");
+        let mut monitor = Monitor::new(&dir, None, None, None).unwrap();
+        monitor.handle_command(&command(4_001, login_payload(1_000, 500, 0))).unwrap();
+
+        let before = ledger_lines(&dir).len();
+        for _ in 0..5 {
+            monitor.handle_packet(connection_packet(404)).unwrap();
+        }
+
+        assert_eq!(ledger_lines(&dir).len(), before, "no ledger records for a connection event");
+        assert_eq!(read_status(&dir)["state"], "waiting_for_handshake");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The interface tells the player when data may have been missed, so the
+    /// count behind that has to mean exactly "a connection was replaced while we
+    /// were recording".  The first login of a run is not one -- nothing had been
+    /// recorded yet -- and the bursts the game sends (four 404s and five
+    /// handshake packets arrived in the same millisecond in the log that
+    /// prompted this) are one reconnect, not nine.
+    #[test]
+    fn only_a_reconnect_while_recording_is_counted() {
+        let dir = temp_dir("reconnect-count");
+        let mut monitor = Monitor::new(&dir, None, None, None).unwrap();
+
+        // The login this run was started for.
+        monitor.handle_packet(connection_packet(0xFF)).unwrap();
+        assert_eq!(read_status(&dir)["reconnects"], 0, "the first login is not a reconnect");
+
+        // Data arrives, then the connection is replaced twice in a burst.
+        monitor.handle_command(&command(4_001, login_payload(1_000, 500, 0))).unwrap();
+        monitor.handle_packet(connection_packet(0xFF)).unwrap();
+        monitor.handle_packet(connection_packet(0xFF)).unwrap();
+        assert_eq!(read_status(&dir)["reconnects"], 1, "a burst is one reconnect");
+
+        // A 404 for the same dead connection does not count again either.
+        monitor.handle_packet(connection_packet(404)).unwrap();
+        assert_eq!(read_status(&dir)["reconnects"], 1);
+
+        // Once data is flowing again, the next reconnect is a new one.
+        monitor.handle_command(&command(4_002, login_payload(1_100, 500, 0))).unwrap();
+        monitor.handle_packet(connection_packet(404)).unwrap();
+        assert_eq!(read_status(&dir)["reconnects"], 2);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -468,7 +468,15 @@ public partial class MainWindow : Window
 
             if (state == CoreState.WaitingForHandshake)
             {
-                parts.Add("密钥要在登录握手时才能推导——如果是在进入游戏之后才启动的，请退到登录界面重新登录。");
+                // Two very different reasons land here.  Either the core was
+                // started after the login, so it never saw the handshake it needs
+                // -- or a connection was replaced while it *was* recording, which
+                // is an in-game disconnect the player may not even have noticed.
+                // Telling the second user to "log in again" without saying why
+                // reads as though the core forgot a login they just did.
+                parts.Add(_status!.Reconnects > 0
+                    ? "游戏内发生过断网重连，可能存在未被记录的数据；重进游戏（退回登录界面重新登录）会补齐差值。"
+                    : "密钥要在登录握手时才能推导——如果是在进入游戏之后才启动的，请退到登录界面重新登录。");
             }
 
             if (_status!.Nickname is { Length: > 0 } nickname)
