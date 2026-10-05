@@ -1,24 +1,25 @@
 //! What the pinned decoder says when it cannot make sense of a packet.
 //!
-//! `auto-artifactarium` answers a packet it cannot decrypt by brute-forcing the
-//! seeds of the session it is holding, and then announcing the failure -- once
-//! per search, plus a line per packet.  Those lines are a symptom rather than a
-//! diagnostic, and a connection whose key no longer fits produces them by the
-//! thousand: 2835 searches and 5670 lines over 14 minutes in the run that
-//! prompted this, with nothing recorded.
+//! `auto-artifactarium` reports a packet it cannot use and then moves on: a
+//! datagram for a conversation it does not hold, a KCP header too short to be
+//! one, a payload it cannot decrypt -- the last of which it answers by
+//! brute-forcing the seeds of the session it is holding, once per seed.  None of
+//! those lines is a diagnostic, and a connection whose key no longer fits
+//! produces them by the thousand: 2835 searches and 5670 lines over 14 minutes
+//! in the run that prompted this, with nothing recorded.
 //!
-//! So they are dropped from the log and counted here instead.  The count is the
-//! only reliable way for the rest of the program to learn that the decoder is
-//! *searching and losing*, which is the state worth giving up on.  A packet
-//! that decodes to nothing is emphatically not that signal, which is worth
-//! spelling out because treating it as one cost a debugging round: a datagram
-//! carrying only acknowledgements, a duplicate, or a segment the KCP receive
-//! window refused all produce the very same empty batch.
+//! So they are dropped from the log and counted here instead, and the count is
+//! the only reliable way for the rest of the program to learn that the decoder
+//! cannot read what is arriving.  A packet that decodes to nothing is
+//! emphatically not that signal, which is worth spelling out because treating it
+//! as one cost a debugging round: a datagram carrying only acknowledgements, a
+//! duplicate, or a segment the KCP receive window refused all produce the very
+//! same empty batch, silently and in runs.
 //!
-//! Counting happens while the event is on its way to the log, so it is one
-//! line of code away from the verdict itself.  The price is that a `RUST_LOG`
-//! which silences these messages also silences the count; that only ever costs
-//! the automatic recovery described in `monitor`, never correctness.
+//! Counting happens while the event is on its way to the log, so it is one line
+//! of code away from the verdict itself.  The price is that a `RUST_LOG` which
+//! silences these messages also silences the count; that only ever costs the
+//! automatic recovery described in `monitor`, never correctness.
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,17 +27,25 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::{Context, Filter};
 
-/// Written by the decoder for every seed it searches and cannot use.
+/// Written for every seed the decoder searches and cannot use.
 const LOST_SEARCH: &str = "Unable to find the encryption key seed";
 
 /// Written when a packet could not be decrypted at all, whether or not there
 /// was anything left to search.
 const NO_KEY: &str = "Couldn't bruteforce";
 
+/// Written for a datagram belonging to a conversation other than the one the
+/// decoder holds -- the ordinary shape of "the game moved to a new connection
+/// and we are still listening on the old one".
+const FOREIGN_CONVERSATION: &str = "packet did not belong to conversation";
+
+/// Written for a datagram too short to carry a KCP header at all.
+const SHORT_HEADER: &str = "kcp header was too short";
+
 /// Searches the decoder has run and lost since this process started.
 static LOST_SEARCHES: AtomicU64 = AtomicU64::new(0);
 
-/// Packets the decoder could not decrypt at all since this process started.
+/// Packets the decoder could not use at all since this process started.
 static UNREADABLE: AtomicU64 = AtomicU64::new(0);
 
 /// How many searches over the seeds the decoder has run and lost so far.
@@ -44,26 +53,26 @@ pub fn lost_searches() -> u64 {
     LOST_SEARCHES.load(Ordering::Relaxed)
 }
 
-/// How many packets the decoder has failed to decrypt so far.
+/// How many packets the decoder has failed to read so far.
 ///
 /// This is the broader of the two counts and the one worth acting on: it covers
-/// a session key that no longer fits *and* a connection whose key material was
-/// never obtained at all, which look identical from the outside but produce
-/// very different numbers of lost searches -- none in the second case, because
-/// there is nothing to search.
+/// a session key that no longer fits, a conversation we no longer hold, and a
+/// connection whose key material was never obtained at all -- which look
+/// identical from the outside but produce very different numbers of lost
+/// searches, none in the last case, because there is nothing to search.
 pub fn unreadable_packets() -> u64 {
     UNREADABLE.load(Ordering::Relaxed)
 }
 
-/// Drops the decoder's per-packet complaints, counting the expensive one.
+/// Drops the decoder's per-packet complaints and counts them.
 ///
 /// Matched on the text rather than on the level and target, because those are
-/// shared with messages that do matter: `No dispatch key found` and `Didn't get
-/// magic in try_new!` are how the pinned decoder announces that the game has
-/// outgrown it, and they have to stay visible.
-pub struct DropLostSearches;
+/// shared with messages that do matter and that are rare enough to be worth
+/// keeping: `No dispatch key found` and `Didn't get magic in try_new!` are how
+/// the pinned decoder announces that the game has outgrown it.
+pub struct DecoderTrouble;
 
-impl<S: tracing::Subscriber> Filter<S> for DropLostSearches {
+impl<S: tracing::Subscriber> Filter<S> for DecoderTrouble {
     fn enabled(&self, _: &tracing::Metadata<'_>, _: &Context<'_, S>) -> bool {
         true
     }
@@ -80,7 +89,10 @@ impl<S: tracing::Subscriber> Filter<S> for DropLostSearches {
             return false;
         }
 
-        if text.contains(NO_KEY) {
+        if text.contains(NO_KEY)
+            || text.contains(FOREIGN_CONVERSATION)
+            || text.contains(SHORT_HEADER)
+        {
             UNREADABLE.fetch_add(1, Ordering::Relaxed);
             return false;
         }
@@ -159,7 +171,7 @@ mod tests {
                 .with_ansi(false)
                 .with_writer(capture.clone())
                 .with_filter(EnvFilter::new("warn,irminsul=info"))
-                .with_filter(DropLostSearches),
+                .with_filter(DecoderTrouble),
         );
 
         tracing::subscriber::with_default(subscriber, events);
@@ -177,6 +189,8 @@ mod tests {
         let log = logged(|| {
             tracing::warn!(target: "auto_artifactarium::crypto", "Unable to find the encryption key seed.");
             tracing::error!(target: "auto_artifactarium", "Couldn't bruteforce from deduced keys");
+            tracing::warn!(target: "auto_artifactarium::kcp", "packet did not belong to conversation");
+            tracing::warn!(target: "auto_artifactarium::kcp", "kcp header was too short");
             tracing::error!(target: "auto_artifactarium", "No dispatch key found");
             tracing::error!(target: "auto_artifactarium", "Didn't get magic in try_new!");
             tracing::warn!(target: "irminsul::monitor", "the game's connection ended");
@@ -184,6 +198,8 @@ mod tests {
 
         assert!(!log.contains("Unable to find the encryption key seed"), "{log}");
         assert!(!log.contains("Couldn't bruteforce"), "{log}");
+        assert!(!log.contains("did not belong to conversation"), "{log}");
+        assert!(!log.contains("kcp header was too short"), "{log}");
         assert!(log.contains("No dispatch key found"), "{log}");
         assert!(log.contains("Didn't get magic in try_new!"), "{log}");
         assert!(log.contains("the game's connection ended"), "{log}");
@@ -202,13 +218,15 @@ mod tests {
         logged(|| {
             tracing::error!(target: "auto_artifactarium", "Couldn't bruteforce from deduced keys");
             tracing::error!(target: "auto_artifactarium", "Couldn't bruteforce from deduced keys");
+            tracing::warn!(target: "auto_artifactarium::kcp", "packet did not belong to conversation");
         });
         assert_eq!(
             unreadable_packets(),
-            before.0 + 2,
-            "a packet that failed without a search is still a packet that failed"
+            before.0 + 3,
+            "a packet that failed without a search, and one the decoder refused for its \
+             conversation, are both packets it could not read"
         );
-        assert_eq!(lost_searches(), before.1, "but it is not a search");
+        assert_eq!(lost_searches(), before.1, "but neither is a search");
 
         logged(|| {
             tracing::warn!(target: "auto_artifactarium::crypto", "Unable to find the encryption key seed.");
@@ -218,7 +236,7 @@ mod tests {
         assert_eq!(lost_searches(), before.1 + 3);
         assert_eq!(
             unreadable_packets(),
-            before.0 + 2,
+            before.0 + 3,
             "a search that was lost belongs to a packet that was already counted"
         );
     }

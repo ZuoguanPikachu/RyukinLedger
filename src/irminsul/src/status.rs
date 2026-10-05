@@ -72,10 +72,10 @@ pub struct Status {
     pub complete: bool,
     /// Whether *this* run has received game data yet.
     pub session_data: bool,
-    /// How often the game's connection was replaced after this run had already
-    /// been recording.  Anything that happened in those windows could not be
-    /// recorded, which is what the interface explains when the core asks for a
-    /// login the player has already done.
+    /// How often this run had to give up on a connection because the decoder
+    /// could no longer read it.  Anything that happened while it was blind could
+    /// not be recorded, which is what the interface explains when the core asks
+    /// for a login the player has already done.
     pub reconnects: u64,
     /// Whether the game process is running, so the app can tell "start the
     /// game" apart from "the game is running but the handshake was missed".

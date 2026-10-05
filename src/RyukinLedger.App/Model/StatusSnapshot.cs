@@ -57,11 +57,12 @@ public sealed class StatusSnapshot
     public bool SessionData { get; init; }
 
     /// <summary>
-    /// How often the connection was replaced after this run had already been
-    /// recording: an in-game disconnect and reconnect (or the game being closed
-    /// and started again).  Data from those windows cannot be recorded, so the
+    /// How often the core had to give up on a connection because it could no
+    /// longer read it.  Data from those windows cannot be recorded, so the
     /// interface says so rather than leaving the player to guess why the core is
-    /// waiting for a handshake they already did.
+    /// waiting for a handshake they already did.  A connection the game merely
+    /// replaced -- leaving co-op, say -- is not counted, because nothing is lost
+    /// there.
     /// </summary>
     public long Reconnects { get; init; }
 

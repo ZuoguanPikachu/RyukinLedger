@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+use auto_artifactarium::r#gen::protos::PacketHead;
 use auto_artifactarium::{ConnectionPacket, GameCommand, GamePacket, GameSniffer};
 use base64::prelude::*;
 
@@ -107,10 +108,11 @@ pub struct Monitor {
     first_command_at: Option<Instant>,
     /// The stalled-login warning has been emitted for this connection.
     stall_reported: bool,
-    /// How often the game's connection was replaced after this run had already
-    /// been recording.  Anything that happened in those windows could not be
-    /// recorded, so the interface explains it instead of leaving the player
-    /// wondering why the core asks them to log in when they already have.
+    /// How often this run had to give up on a connection because the decoder
+    /// could no longer read it.  Anything that happened while it was blind could
+    /// not be recorded, which is what the interface explains; a connection the
+    /// game merely replaced -- leaving co-op, say -- is not counted, because
+    /// nothing is missed there.
     reconnects: u64,
     /// When the first game data of this run arrived, used to time the check for
     /// a missing store sync.
@@ -286,38 +288,36 @@ impl Monitor {
 
         match parsed {
             GamePacket::Connection(ConnectionPacket::HandshakeRequested) => {
-                // The sniffer has dropped its keys: the player is logging in
-                // again, and a fresh session key will be derived.  The known
-                // balances stay valid, so no data is lost here.  What does
-                // describe the old connection is the bookkeeping below, so that
-                // is cleared: the next data belongs to a new login.
+                // The player is logging in again.  Upstream drops the session
+                // key and both KCP receive states here; what it deliberately
+                // keeps -- the seeds, the send time and the client seed it
+                // derived -- is what lets it recognise the same session again
+                // when the game only replaced its connection rather than its
+                // login.  Only the bookkeeping below describes the old
+                // connection, so only that is cleared.
                 tracing::info!("handshake requested; deriving a new session key");
-                self.note_reconnect();
                 self.forget_connection_progress();
                 self.publish()?;
             }
             GamePacket::Connection(ConnectionPacket::Disconnected) => {
-                // The one signal the game gives that a connection is over, and
-                // the only one that does not depend on the next login being
-                // decoded to be noticed.  Upstream clears its state for a new
-                // handshake and nothing else, so a session that ends without one
-                // (the game was closed and started again) leaves the old session
-                // key, its seeds and a KCP receive window behind -- all of them
-                // describing a connection that no longer exists.
+                // A connection ended.  That is *not* the same as a session
+                // ending, and pretending it is cost more than it bought: the
+                // game replaces its connection for ordinary reasons -- leaving
+                // co-op, or leaving the Serenitea Pot, which counts as co-op --
+                // and the log shows what that looks like from here: nine of
+                // these, then a fresh handshake eleven milliseconds later.
                 //
-                // What follows is not a clean failure.  Every packet of the next
-                // login is decrypted with the wrong key and then spent on a
-                // brute-force search over the *previous* session's seeds, which
-                // takes ~200 ms per attempt and cannot succeed; the one packet
-                // that could repair that state -- the new session's seed packet
-                // -- arrives once, in the middle of the login burst, and is
-                // easily lost while the core is busy.  From the outside the run
-                // then looks like "recording" with nothing recorded, until the
-                // core is restarted.  Dropping the state here makes the next
-                // login decode exactly as it does after a restart.
-                tracing::warn!("the game's connection ended; dropping the session key and the capture state");
-                self.note_reconnect();
-                self.reset_capture_state();
+                // The key, the seeds and the client seed survive that
+                // replacement, and the decoder needs them: with its client seed
+                // gone it can only search around the new token response's send
+                // time, which is what failed for thirty packets in that run
+                // while recording sat still.  So this only says what happened,
+                // and leaving the connection state alone is what makes the next
+                // connection readable.  A connection that really is gone is
+                // caught by the packets that cannot be read -- see
+                // `note_unreadable` -- rather than by this event.
+                tracing::warn!("the game's connection ended");
+                self.forget_connection_progress();
                 self.publish()?;
             }
             GamePacket::Connection(_) => {}
@@ -349,6 +349,11 @@ impl Monitor {
     /// there also collapses the bursts the game sends -- four 404s and five
     /// handshake packets can arrive in the same millisecond -- into one event,
     /// because the first one clears the flag.
+    ///
+    /// Only a connection that was *given up on* counts, because that is the
+    /// only case in which data can have been missed: the connection events
+    /// themselves are ordinary, and saying "data may be missing, log in again"
+    /// every time the player leaves co-op is how a warning stops being read.
     fn note_reconnect(&mut self) {
         if self.session_data {
             self.reconnects += 1;
@@ -414,9 +419,12 @@ impl Monitor {
     /// Forget what the run knows about the connection that just ended.
     ///
     /// These flags all describe a live connection: whether handshake traffic has
-    /// been decoded, whether real game data has arrived, and the bookkeeping
-    /// that decides when to complain about a missing store sync.  The balances
-    /// are *not* part of this -- they belong to the ledger and survive.
+    /// been decoded, whether real game data has arrived, and the timers behind
+    /// the two "nothing arrived" warnings.  The balances are *not* part of this
+    /// -- they belong to the ledger and survive -- and neither is what the run
+    /// has learned about the *account*: a store sync enumerates the inventory
+    /// once per login, and the connection the game replaced eleven milliseconds
+    /// after leaving co-op is not a new login that owes us another one.
     fn forget_connection_progress(&mut self) {
         self.handshake = false;
         self.session_data = false;
@@ -425,16 +433,16 @@ impl Monitor {
         self.first_command_at = None;
         self.stall_reported = false;
         self.first_data_at = None;
-        self.store_sync_seen = false;
-        self.missing_store_reported = false;
     }
 
     /// Put the capture back into the state a freshly started process is in.
     ///
-    /// Rebuilding the sniffer is the only way to get there: the session key and
-    /// the KCP state live inside it, and it exposes no way to clear them.  This
-    /// is what lets "close the game, start it again" recover without restarting
-    /// the core -- it does exactly what the restart was doing by accident.
+    /// Rebuilding the sniffer is the only way to get there: the session key, its
+    /// seeds, the client seed and the KCP state all live inside it, and it
+    /// exposes no way to clear any of them.  It is therefore a last resort, used
+    /// only when the packets have proved that the decoder cannot read the
+    /// connection it is holding -- never on a connection event, which the game
+    /// sends for ordinary reasons.
     fn reset_capture_state(&mut self) {
         self.sniffer = GameSniffer::new().set_initial_keys(self.keys.clone());
         self.forget_connection_progress();
@@ -450,6 +458,19 @@ impl Monitor {
         self.first_command_at.get_or_insert_with(Instant::now);
 
         *self.commands_seen.entry(command.command_id).or_insert(0) += 1;
+
+        // What the game sent and when it says it sent it.  `sent_ms` is the
+        // clock a client seeds its stream keys from, so when a connection is
+        // replaced and the decoder can no longer derive the session key, these
+        // times are what tells "the search window is in the wrong place" apart
+        // from "the key material is gone" -- the two need different repairs and
+        // look identical from outside.  Off by default; `RUST_LOG=irminsul=debug`
+        // turns it on, and the parse is skipped entirely unless it is on.
+        if tracing::enabled!(tracing::Level::DEBUG)
+            && let Ok(head) = command.parse_proto::<PacketHead>()
+        {
+            tracing::debug!(command_id = command.command_id, sent_ms = head.sent_ms, "decoded command");
+        }
 
         // The store sync is recognised by its command id, and its items are read
         // with our own wire parser rather than the generated protobuf type.  The
@@ -1200,20 +1221,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `disconnected packet` is the one signal the game gives that a connection
-    /// is over, and it used to be thrown away: the session key, its seeds and the
-    /// KCP receive state stayed behind, describing a connection that no longer
-    /// existed.  Every packet of the next login was then decrypted with the wrong
-    /// key and spent on a brute-force search that could not succeed, so the core
-    /// kept reporting "recording" while recording nothing, and only restarting it
-    /// helped.  The event now resets that state, and says so in the log.
+    /// The game ends a connection for ordinary reasons, and the one the log
+    /// showed was leaving co-op: nine of these, then a fresh handshake eleven
+    /// milliseconds later.  Nothing is decided here beyond telling the truth
+    /// about what the run is doing -- the keys and the KCP state stay, because
+    /// they are what makes the replacement readable, and a connection that
+    /// really is gone is caught by the packets that cannot be read.
     #[test]
-    fn a_disconnected_packet_resets_the_capture_state() {
+    fn a_disconnected_packet_does_not_throw_the_keys_away() {
         let dir = temp_dir("disconnected");
         let mut monitor = Monitor::new(&dir, None, None, None).unwrap();
 
-        // A session that is up and running.
+        // A session that is up and running, with the inventory enumerated.
         monitor.handle_command(&command(4_001, login_payload(1_000, 500, 0))).unwrap();
+        monitor
+            .handle_command(&command(PLAYER_STORE_NOTIFY, store_payload(9, 4, 55)))
+            .unwrap();
         let status = read_status(&dir);
         assert_eq!(status["state"], "tracking");
         assert_eq!(status["session_data"], true);
@@ -1221,14 +1244,20 @@ mod tests {
         // The game closes the connection.
         monitor.handle_packet(connection_packet(404)).unwrap();
 
-        // The key is gone, so "recording" would be a lie -- and the balances,
-        // which belong to the ledger rather than to the connection, survive.
+        // "Recording" would be a lie until packets are decoded again -- and the
+        // balances, which belong to the ledger rather than to the connection,
+        // survive.
         let status = read_status(&dir);
         assert_eq!(status["state"], "waiting_for_handshake");
         assert_eq!(status["session_data"], false);
         assert_eq!(status["balances"]["primogems"], 1_000);
+        assert_eq!(status["reconnects"], 0, "a connection event is not yet a reconnect");
+        assert!(
+            monitor.store_sync_seen,
+            "the inventory the run already enumerated does not need enumerating again"
+        );
 
-        // The next login is a new connection: its snapshot is compared against
+        // The next connection is read as usual: its snapshot is compared against
         // what the ledger already knows, so a change made in between is a gap
         // and not income.
         monitor.handle_command(&command(4_002, login_payload(1_600, 500, 0))).unwrap();
@@ -1289,13 +1318,13 @@ mod tests {
     }
 
     /// The interface tells the player when data may have been missed, so the
-    /// count behind that has to mean exactly "a connection was replaced while we
-    /// were recording".  The first login of a run is not one -- nothing had been
-    /// recorded yet -- and the bursts the game sends (four 404s and five
-    /// handshake packets arrived in the same millisecond in the log that
-    /// prompted this) are one reconnect, not nine.
+    /// count behind that has to mean exactly "this run was blind for a while".
+    /// Replacing a connection is not that: leaving co-op does it, it costs
+    /// nothing, and warning about it every time is how a warning stops being
+    /// read.  What counts is having given up on a connection because nothing
+    /// could be decoded.
     #[test]
-    fn only_a_reconnect_while_recording_is_counted() {
+    fn only_a_connection_that_was_given_up_on_is_counted() {
         let dir = temp_dir("reconnect-count");
         let mut monitor = Monitor::new(&dir, None, None, None).unwrap();
 
@@ -1303,19 +1332,22 @@ mod tests {
         monitor.handle_packet(connection_packet(0xFF)).unwrap();
         assert_eq!(read_status(&dir)["reconnects"], 0, "the first login is not a reconnect");
 
-        // Data arrives, then the connection is replaced twice in a burst.
+        // Data arrives, then the connection is replaced twice in a burst, and
+        // then the game closes it.  None of that is a reconnect on its own.
         monitor.handle_command(&command(4_001, login_payload(1_000, 500, 0))).unwrap();
         monitor.handle_packet(connection_packet(0xFF)).unwrap();
         monitor.handle_packet(connection_packet(0xFF)).unwrap();
-        assert_eq!(read_status(&dir)["reconnects"], 1, "a burst is one reconnect");
-
-        // A 404 for the same dead connection does not count again either.
         monitor.handle_packet(connection_packet(404)).unwrap();
+        assert_eq!(read_status(&dir)["reconnects"], 0);
+
+        // Data flows again, and then stops being readable: that is a reconnect,
+        // and the second one is a second reconnect.
+        monitor.handle_command(&command(4_002, login_payload(1_100, 500, 0))).unwrap();
+        monitor.note_unreadable(UNREADABLE_LIMIT).unwrap();
         assert_eq!(read_status(&dir)["reconnects"], 1);
 
-        // Once data is flowing again, the next reconnect is a new one.
-        monitor.handle_command(&command(4_002, login_payload(1_100, 500, 0))).unwrap();
-        monitor.handle_packet(connection_packet(404)).unwrap();
+        monitor.handle_command(&command(4_003, login_payload(1_200, 500, 0))).unwrap();
+        monitor.note_unreadable(UNREADABLE_LIMIT).unwrap();
         assert_eq!(read_status(&dir)["reconnects"], 2);
 
         let _ = std::fs::remove_dir_all(&dir);

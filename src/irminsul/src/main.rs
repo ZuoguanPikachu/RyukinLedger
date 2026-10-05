@@ -138,7 +138,7 @@ fn tracing_init(data_dir: &std::path::Path, verbose: bool) -> Result<()> {
                 .with_writer(non_blocking)
                 .with_ansi(false)
                 .with_filter(EnvFilter::new(filter))
-                .with_filter(decoder_log::DropLostSearches),
+                .with_filter(decoder_log::DecoderTrouble),
         )
         .init();
 
