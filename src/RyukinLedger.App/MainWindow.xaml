@@ -126,20 +126,23 @@
         <!--
           背景立绘：整窗铺满，不做任何"留白给它"的布局安排——它就在所有控件后面，
           靠卡片的半透明透出来。
-          对齐方式是 Top 而不是默认的居中：立绘是竖幅，铺满 1180 宽后高度远超窗口，
-          居中的话会把上面的金鱼裁掉，只留下身子。
+          这里拿到的图已经被 AssetLibrary 放到一块更大的画布上（垫的是图片自身边缘
+          的颜色，见 BackgroundArtScale），所以人物不会再被放大成一整张大脸。对齐用
+          Center：铺满 1180 宽后画面仍比窗口高约四分之一，上下对称地裁，人物在正中间。
+          不透明度取 0.30 这一档：0.52 时透出来的人形还压着图表读数，再淡就只剩一层
+          看不出是什么的暖色；0.30 是"看得出有画、又不跟数字抢"的位置。
         -->
-        <Rectangle x:Name="BackdropArt" IsHitTestVisible="False" Opacity="0.52"
+        <Rectangle x:Name="BackdropArt" IsHitTestVisible="False" Opacity="0.30"
                    Visibility="Collapsed">
             <Rectangle.Fill>
                 <ImageBrush x:Name="BackdropArtBrush"
-                            Stretch="UniformToFill" AlignmentX="Center" AlignmentY="Top" />
+                            Stretch="UniformToFill" AlignmentX="Center" AlignmentY="Center" />
             </Rectangle.Fill>
             <Rectangle.Effect>
                 <!--
                   固定「淡」档。两个极端都实测过：半径 12 时透过卡片只剩一团
-                  认不出来是什么的色块，金鱼和人都没了；完全不透明 + 半径 3.5
-                  又太抢眼，压着图表读数。
+                  认不出来是什么的色块；完全不透明 + 半径 3.5 又太抢眼，
+                  压着图表读数。
                 -->
                 <BlurEffect Radius="6.0" KernelType="Gaussian" />
             </Rectangle.Effect>

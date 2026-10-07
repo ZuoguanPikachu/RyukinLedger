@@ -16,7 +16,7 @@
     <!--
       The executable's own icon: the one Explorer, the task bar and any shortcut
       show.  This is the only place the icon is embedded.  Window.Icon and the
-      tray icon both load assets\app.ico from disk instead, so the same 148 KB
+      tray icon both load assets\app.ico from disk instead, so the same 170 KB
       is not carried inside the assembly twice.
     -->
     <ApplicationIcon>..\..\assets\app.ico</ApplicationIcon>
@@ -71,7 +71,7 @@
   <ItemGroup>
     <!--
       Artwork travels next to the executable instead of inside it.  The
-      background illustration alone is several megabytes, and an embedded copy
+      background illustration alone is over a megabyte, and an embedded copy
       would put all of it into the assembly for no benefit; loose files also mean
       the picture can be swapped without a rebuild.
 
