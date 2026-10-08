@@ -29,7 +29,7 @@ use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use chrono::{Local, SecondsFormat};
+use chrono::{DateTime, Local, SecondsFormat};
 use serde::Serialize;
 
 pub const LEDGER_FILE: &str = "ledger.jsonl";
@@ -143,8 +143,15 @@ pub enum Record {
     },
 }
 
+/// Now, in the one timestamp format this program writes anywhere.
 pub fn now() -> String {
-    Local::now().to_rfc3339_opts(SecondsFormat::Millis, false)
+    timestamp(Local::now())
+}
+
+/// Format an instant the way every timestamp this program writes is formatted,
+/// so a reader needs exactly one parser for all of them.
+pub fn timestamp(at: DateTime<Local>) -> String {
+    at.to_rfc3339_opts(SecondsFormat::Millis, false)
 }
 
 /// Writer for the ledger file.

@@ -15,11 +15,20 @@
 //!
 //! [`crate::ledger::Change`] carries the previous value so the ledger can make
 //! that distinction.
+//!
+//! 原粹树脂 is the one thing tracked here that is not a currency: it has no
+//! income and no expense, so its value is only reported (see
+//! [`BalanceTracker::original_resin`]) and never becomes a ledger record.  It is
+//! also the only value that moves without the game saying so, which is
+//! [`ResinClock`]'s business rather than the ledger's.
 
 use std::collections::{BTreeMap, HashMap};
 
+use chrono::{DateTime, Local};
+
 use crate::ledger::{Change, ChangeSource, Currency};
 use crate::proto_wire;
+use crate::resin::ResinClock;
 
 /// Item ids of the wish-related currencies, as carried by `PlayerStoreNotify`
 /// and the store item change notifies.
@@ -62,6 +71,13 @@ pub struct BalanceTracker {
     /// item.
     item_guids: HashMap<u64, u32>,
     nickname: Option<String>,
+    /// 原粹树脂, with the clock its regeneration is extrapolated along: a
+    /// stock, kept out of [`Self::balances`] and out of the ledger on purpose.
+    ///
+    /// The value it reports is only ever as fresh as the game's last word --
+    /// resin regenerates on its own and the game sends nothing for that -- so
+    /// the clock, not this field, is what answers "what is it now".
+    original_resin: ResinClock,
 }
 
 impl BalanceTracker {
@@ -70,11 +86,29 @@ impl BalanceTracker {
             balances: seed,
             item_guids: HashMap::new(),
             nickname: None,
+            original_resin: ResinClock::new(),
         }
     }
 
     pub fn balances(&self) -> &BTreeMap<Currency, i64> {
         &self.balances
+    }
+
+    /// The 原粹树脂 the game is showing at `at`, or `None` while it has
+    /// reported no value at all.
+    pub fn original_resin(&self, at: DateTime<Local>) -> Option<i64> {
+        self.original_resin.value_at(at)
+    }
+
+    /// When the game was last seen adding a point of 原粹树脂, if that has ever
+    /// been seen.
+    ///
+    /// Published alongside the value as the anchor of the extrapolation: with
+    /// this instant and the value at some later instant, a reader can work out
+    /// the value at any time after -- exactly, and without the core still
+    /// running.
+    pub fn original_resin_increased_at(&self) -> Option<DateTime<Local>> {
+        self.original_resin.last_increase_at()
     }
 
     /// Whether every recorded currency has a known value.
@@ -97,6 +131,8 @@ impl BalanceTracker {
 
     /// Record a full player-data snapshot.
     pub fn snapshot_props(&mut self, props: &BTreeMap<u32, i64>) -> Vec<Change> {
+        self.note_original_resin(props, false);
+
         let mut changes = Vec::new();
         for (ids, currency) in TRACKED_PROPS {
             if let Some(balance) = proto_wire::prop_value(props, ids) {
@@ -138,6 +174,8 @@ impl BalanceTracker {
 
     /// Record an incremental player-prop update.
     pub fn live_prop_updates(&mut self, props: &BTreeMap<u32, i64>) -> Vec<Change> {
+        self.note_original_resin(props, true);
+
         let mut changes = Vec::new();
         for (ids, currency) in TRACKED_PROPS {
             if let Some(balance) = proto_wire::prop_value(props, ids) {
@@ -174,6 +212,23 @@ impl BalanceTracker {
             self.push(&mut result, currency, 0, ChangeSource::Live);
         }
         result
+    }
+
+    /// Note the 原粹树脂 the packet carries, if it carries one.
+    ///
+    /// Deliberately silent in the other direction: a prop map that does not
+    /// mention resin leaves the last value alone rather than clearing it.  The
+    /// game sends only the props that changed, so "absent" here means "not part
+    /// of this update", never "empty" -- unlike a store sync, which enumerates
+    /// everything and therefore *does* mean zero when an item is missing.
+    ///
+    /// `live` distinguishes an incremental update from a full sync, which is
+    /// what decides whether the value can pin the regeneration cadence.  See
+    /// [`ResinClock::observe`].
+    fn note_original_resin(&mut self, props: &BTreeMap<u32, i64>, live: bool) {
+        if let Some(resin) = proto_wire::prop_value_any(props, &proto_wire::RESIN_PROP_IDS) {
+            self.original_resin.observe(resin, live, Local::now());
+        }
     }
 
     /// Record a change, skipping values that did not actually change.
@@ -320,6 +375,69 @@ mod tests {
         assert_eq!(changes.len(), 2);
         assert_eq!(tracker.balances().get(&Currency::Primogems), Some(&42));
         assert_eq!(tracker.balances().get(&Currency::Mora), Some(&43));
+    }
+
+    /// 原粹树脂 is a stock, not a flow: the game reports it as a player prop,
+    /// and nothing about it ever becomes a ledger change.
+    #[test]
+    fn original_resin_is_reported_without_becoming_a_change() {
+        // Balances matching what the snapshot is about to report, so any change
+        // the tracker produces below can only have come from the stock.
+        let mut tracker = BalanceTracker::new(known(&[
+            (Currency::Primogems, 10_000),
+            (Currency::Mora, 2_000_000),
+            (Currency::GenesisCrystals, 300),
+        ]));
+
+        let changes = tracker.snapshot_props(&BTreeMap::from([
+            (proto_wire::PROP_PRIMOGEM, 10_000),
+            (proto_wire::PROP_MORA, 2_000_000),
+            (proto_wire::PROP_GENESIS_CRYSTAL, 300),
+            (proto_wire::PROP_ORIGINAL_RESIN, 137),
+        ]));
+        assert_eq!(tracker.original_resin(Local::now()), Some(137));
+        assert_eq!(
+            tracker.original_resin_increased_at(),
+            None,
+            "a sync cannot anchor the cadence"
+        );
+        assert!(changes.is_empty(), "the stock must not produce a change: {changes:?}");
+
+        // Spending resin or restoring it with a fragile resin is reported with
+        // the new value, and is still neither an expense nor an income.
+        let changes = tracker.live_prop_updates(&BTreeMap::from([(proto_wire::PROP_ORIGINAL_RESIN, 97)]));
+        assert!(changes.is_empty(), "the stock must not produce a change: {changes:?}");
+        assert_eq!(tracker.original_resin(Local::now()), Some(97));
+        assert_eq!(
+            tracker.original_resin_increased_at(),
+            None,
+            "a spend is not a regeneration point"
+        );
+
+        // The game adding one is the observation that anchors the cadence.
+        tracker.live_prop_updates(&BTreeMap::from([(proto_wire::PROP_ORIGINAL_RESIN, 98)]));
+        assert_eq!(tracker.original_resin(Local::now()), Some(98));
+        assert!(
+            tracker.original_resin_increased_at().is_some(),
+            "a live +1 anchors the cadence"
+        );
+
+        // A prop map that does not mention resin says nothing about it: only the
+        // props that changed are sent, so "absent" is not "empty".
+        tracker.live_prop_updates(&BTreeMap::from([(proto_wire::PROP_MORA, 1_999_000)]));
+        assert_eq!(tracker.original_resin(Local::now()), Some(98), "an unrelated update must not clear it");
+    }
+
+    /// Nothing has been observed until the game actually mentions the prop --
+    /// which is why the value is `None` and not zero.
+    #[test]
+    fn an_unseen_original_resin_is_unknown() {
+        let mut tracker = BalanceTracker::new(known(&[]));
+        assert_eq!(tracker.original_resin(Local::now()), None, "nothing has been observed yet");
+        assert!(tracker.original_resin_increased_at().is_none());
+
+        tracker.snapshot_props(&BTreeMap::from([(proto_wire::PROP_PRIMOGEM, 1)]));
+        assert_eq!(tracker.original_resin(Local::now()), None, "a prop map without it is not a zero");
     }
 
     /// Item removals resolve through the guid map learned earlier.

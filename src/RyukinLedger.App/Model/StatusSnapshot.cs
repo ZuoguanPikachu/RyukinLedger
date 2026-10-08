@@ -50,6 +50,32 @@ public sealed class StatusSnapshot
     public string? Nickname { get; init; }
     public Dictionary<Currency, long> Balances { get; init; } = [];
 
+    /// <summary>
+    /// 原粹树脂 as the core's model says the game is showing it, or <c>null</c>
+    /// while the game has reported no value.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately outside <see cref="Balances"/>: it is not a ledger currency,
+    /// so it takes no part in the resource cards, the chart, the wish total or
+    /// the "every currency is known" test.  It is a value *at
+    /// <see cref="UpdatedAt"/>* -- resin regenerates on its own and the game
+    /// sends nothing for that -- and <see cref="ResinClock.At"/> is what walks
+    /// it forward from there.
+    /// </remarks>
+    public int? OriginalResin { get; init; }
+
+    /// <summary>
+    /// When 原粹树脂 last went up on its own, or <c>null</c> while that has not
+    /// been seen.
+    /// </summary>
+    /// <remarks>
+    /// The anchor <see cref="ResinClock.At"/> extrapolates along.  With it, the
+    /// value keeps being exact however long ago the core last wrote; without it
+    /// -- when nothing but a sync has arrived -- the extrapolation can be one
+    /// point low.
+    /// </remarks>
+    public DateTimeOffset? OriginalResinLastIncreaseAt { get; init; }
+
     /// <summary>Every recorded currency has a known balance (possibly from the ledger).</summary>
     public bool Complete { get; init; }
 
@@ -133,6 +159,8 @@ public sealed class StatusSnapshot
                 Error = GetString(root, "error"),
                 Nickname = GetString(root, "nickname"),
                 Balances = balances,
+                OriginalResin = (int?)GetInt64(root, "original_resin"),
+                OriginalResinLastIncreaseAt = GetTimeOrNull(root, "original_resin_last_increase_at"),
                 Complete = GetBool(root, "complete"),
                 SessionData = GetBool(root, "session_data"),
                 Reconnects = GetInt64(root, "reconnects") ?? 0,
@@ -174,4 +202,10 @@ public sealed class StatusSnapshot
         DateTimeOffset.TryParse(GetString(root, name), CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out DateTimeOffset parsed)
             ? parsed
             : default;
+
+    /// <summary>An instant that may simply not be there, unlike <see cref="GetTime"/>.</summary>
+    private static DateTimeOffset? GetTimeOrNull(JsonElement root, string name) =>
+        DateTimeOffset.TryParse(GetString(root, name), CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out DateTimeOffset parsed)
+            ? parsed
+            : null;
 }

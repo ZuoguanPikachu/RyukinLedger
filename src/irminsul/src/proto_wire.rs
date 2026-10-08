@@ -32,15 +32,36 @@ pub const PROP_HCOIN: u32 = 201;
 pub const PROP_SCOIN: u32 = 202;
 /// `PROP_PLAYER_MCOIN` -- 创世结晶 / Genesis crystals (pre-7.0).
 pub const PROP_MCOIN: u32 = 203;
+/// `PROP_PLAYER_RESIN` (7.0 id) -- 原粹树脂 / Original Resin.
+///
+/// Read from a capture of the 7.1 client: the login snapshot carries it beside
+/// the currencies, and its value is the stamina the game displays next to 原粹
+/// 树脂.
+pub const PROP_ORIGINAL_RESIN: u32 = 10020;
+/// `PROP_PLAYER_RESIN` -- 原粹树脂 / Original Resin (pre-7.0).
+///
+/// Inferred rather than captured, and kept only so a capture from an older
+/// protocol version still finds the stamina: the pre-7.0 prop ids were the ids
+/// of the game's virtual items -- 原石/摩拉/创世结晶 are 201/202/203 in that
+/// table, which is exactly what those props used to be -- and it calls 106
+/// `OriginalResin`.
+pub const PROP_LEGACY_ORIGINAL_RESIN: u32 = 106;
 
 /// The player props that carry a currency, as `(7.0 id, pre-7.0 id)`.
 pub const PRIMOGEM_PROP_IDS: (u32, u32) = (PROP_PRIMOGEM, PROP_HCOIN);
 pub const MORA_PROP_IDS: (u32, u32) = (PROP_MORA, PROP_SCOIN);
 pub const GENESIS_CRYSTAL_PROP_IDS: (u32, u32) = (PROP_GENESIS_CRYSTAL, PROP_MCOIN);
 
+/// The player props that carry 原粹树脂, in the order they are trusted.
+///
+/// A list rather than the `(modern, legacy)` pair the currencies use: there is
+/// one modern id, and the pre-7.0 one is a fallback rather than a second
+/// spelling of the same capture.
+pub const RESIN_PROP_IDS: [u32; 2] = [PROP_ORIGINAL_RESIN, PROP_LEGACY_ORIGINAL_RESIN];
+
 /// Player prop ids that predate the 7.0 namespace, used to recognise an
 /// incremental prop update from an older capture.
-const LEGACY_PROP_IDS: [u32; 3] = [PROP_HCOIN, PROP_SCOIN, PROP_MCOIN];
+const LEGACY_PROP_IDS: [u32; 4] = [PROP_HCOIN, PROP_SCOIN, PROP_MCOIN, PROP_LEGACY_ORIGINAL_RESIN];
 
 /// The 7.0 player prop namespace.  Avatar props (1001..4001) fall outside it.
 const MODERN_PROP_RANGE: std::ops::Range<u32> = 10000..20000;
@@ -382,6 +403,11 @@ pub fn prop_value(props: &BTreeMap<u32, i64>, ids: (u32, u32)) -> Option<i64> {
     props.get(&ids.0).or_else(|| props.get(&ids.1)).copied()
 }
 
+/// Read the value of the first of `ids` that is present.
+pub fn prop_value_any(props: &BTreeMap<u32, i64>, ids: &[u32]) -> Option<i64> {
+    ids.iter().find_map(|id| props.get(id).copied())
+}
+
 /// Encoders for the wire format, used by the tests to build realistic
 /// payloads without a capture of the live game.
 #[cfg(test)]
@@ -550,6 +576,34 @@ mod tests {
         // Legacy ids survive the namespace filter too.
         let payload = prop_notify(&[(PROP_HCOIN, 5)]);
         assert_eq!(extract_prop_updates(&payload).and_then(|p| p.get(&PROP_HCOIN).copied()), Some(5));
+    }
+
+    /// The resin id is the one prop id in this file that came out of a capture,
+    /// so it is worth pinning: the game moving it is exactly the event that
+    /// requires another capture, and a silent edit to this number without one
+    /// would just show a wrong value with no evidence behind it.
+    #[test]
+    fn the_resin_prop_id_comes_from_a_capture() {
+        assert_eq!(PROP_ORIGINAL_RESIN, 10020);
+    }
+
+    /// 原粹树脂 is the one prop that is not part of a `(modern, legacy)` pair:
+    /// the modern id has to survive the incremental-update filter, and so does
+    /// the pre-7.0 one, which predates the 100xx namespace entirely.
+    #[test]
+    fn a_resin_prop_update_survives_the_namespace_filter() {
+        let payload = prop_notify(&[(PROP_ORIGINAL_RESIN, 137), (1_001, 9)]);
+        let props = extract_prop_updates(&payload).expect("resin should be recognised");
+        assert_eq!(prop_value_any(&props, &RESIN_PROP_IDS), Some(137));
+        assert!(!props.contains_key(&1_001), "an avatar prop is not a player prop");
+
+        let payload = prop_notify(&[(PROP_LEGACY_ORIGINAL_RESIN, 12)]);
+        let props = extract_prop_updates(&payload).expect("legacy resin should be recognised");
+        assert_eq!(prop_value_any(&props, &RESIN_PROP_IDS), Some(12));
+
+        // The 7.0 id is the one that is preferred when both are somehow present.
+        let both = BTreeMap::from([(PROP_ORIGINAL_RESIN, 40), (PROP_LEGACY_ORIGINAL_RESIN, 12)]);
+        assert_eq!(prop_value_any(&both, &RESIN_PROP_IDS), Some(40));
     }
 
     #[test]

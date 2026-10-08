@@ -39,6 +39,14 @@ public partial class MainWindow : Window
     /// </summary>
     private readonly Dictionary<Currency, long> _balances = [];
 
+    /// <summary>
+    /// The 原粹树脂 value the window is showing, and the question mark that
+    /// follows it while no core is confirming the number.  Kept because the tray
+    /// tooltip -- the window most of the day -- repeats both.
+    /// </summary>
+    private int? _resinValue;
+    private string _resinMark = string.Empty;
+
     private TrayIcon? _tray;
     private CoreSession? _session;
     private StatusSnapshot? _status;
@@ -138,6 +146,18 @@ public partial class MainWindow : Window
         {
             BackdropArtBrush.ImageSource = backdrop;
             BackdropArt.Visibility = Visibility.Visible;
+        }
+
+        // Same story for the resin icon: the card reads fine with just the name
+        // and the number, so a missing file collapses the image instead of
+        // leaving a hole.
+        if (AssetLibrary.ResinIcon() is { } resinIcon)
+        {
+            ResinIcon.Source = resinIcon;
+        }
+        else
+        {
+            ResinIcon.Visibility = Visibility.Collapsed;
         }
 
         _tray = new TrayIcon();
@@ -499,6 +519,7 @@ public partial class MainWindow : Window
             UpdateActivity();
         }
 
+        UpdateResin();
         UpdateStatusUi();
         UpdateCurrencyCards();
 
@@ -612,7 +633,13 @@ public partial class MainWindow : Window
 
         if (_tray is not null)
         {
-            _tray.SetTooltip($"RyukinLedger — {TrayIcon.DescribeState(state)}");
+            // The tray is the window whenever this one is closed to it, so the
+            // number the card shows goes in the hover text too -- question mark
+            // included, because "not being confirmed" is part of the claim.
+            string resin = _resinValue is { } value
+                ? $"　·　原粹树脂 {DailyChart.Format(value)}{_resinMark}"
+                : string.Empty;
+            _tray.SetTooltip($"RyukinLedger — {TrayIcon.DescribeState(state)}{resin}");
         }
 
         // One notification per state change, and never a stream of them.
@@ -629,6 +656,80 @@ public partial class MainWindow : Window
                     break;
             }
         }
+    }
+
+    /// <summary>
+    /// Shows the 原粹树脂 the game is showing now: the value the core last
+    /// reported, walked forward along the eight-minute clock.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The core decides what the value was and when the game last added a point;
+    /// this only does the arithmetic on top (see <see cref="ResinClock"/>),
+    /// which is also what keeps the number moving while no core is running at
+    /// all.
+    /// </para>
+    /// <para>
+    /// The newest value wins -- a <c>status.json</c> written by a core that has
+    /// since exited is a better starting point than a cache from the day before
+    /// -- but the anchor is kept until a newer one turns up, because it describes
+    /// the game's window rather than one report.  The one thing the card adds on
+    /// its own is a question mark while no core is confirming the number: resin
+    /// spent in the game with nothing recording is invisible here, so the value
+    /// would then sit too high.
+    /// </para>
+    /// <para>
+    /// The card deliberately carries no hover text: the mark says all it needs to
+    /// say on its own, and the reasoning above is for whoever reads this file.
+    /// </para>
+    /// </remarks>
+    private void UpdateResin()
+    {
+        int? value = null;
+        DateTimeOffset from = default;
+        bool live = false;
+
+        if (_settings.OriginalResin is { } cached && _settings.OriginalResinAt is { } cachedAt)
+        {
+            value = cached;
+            from = cachedAt;
+        }
+
+        DateTimeOffset? increasedAt = _settings.OriginalResinIncreasedAt;
+
+        if (_status is { OriginalResin: { } reported } status && status.UpdatedAt > from)
+        {
+            value = reported;
+            from = status.UpdatedAt;
+            live = status.IsAlive;
+
+            // Cached on a new *value*, not on every heartbeat: the estimate only
+            // steps once every eight minutes, and the point is what a later
+            // session has to extrapolate from -- not the fact that the core was
+            // alive a second ago.
+            if (reported != _settings.OriginalResin)
+            {
+                _settings.OriginalResin = reported;
+                _settings.OriginalResinAt = status.UpdatedAt;
+                _settings.Save(AppPaths.SettingsFile);
+            }
+        }
+
+        if (_status?.OriginalResinLastIncreaseAt is { } anchor &&
+            (increasedAt is null || anchor > increasedAt))
+        {
+            increasedAt = anchor;
+            _settings.OriginalResinIncreasedAt = anchor;
+            _settings.Save(AppPaths.SettingsFile);
+        }
+
+        _resinValue = value is { } baseline && from != default
+            ? ResinClock.At(baseline, from, increasedAt, DateTimeOffset.Now)
+            : null;
+
+        ResinValueText.Text = _resinValue is { } shown ? DailyChart.Format(shown) : "—";
+        _resinMark = _resinValue is not null && !live ? "?" : string.Empty;
+        ResinMarkText.Text = _resinMark;
     }
 
     private void UpdateCurrencyCards()

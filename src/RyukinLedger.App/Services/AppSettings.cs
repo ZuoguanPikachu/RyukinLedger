@@ -49,6 +49,28 @@ public sealed class AppSettings
     public Currency ChartCurrency { get; set; } = Currency.Primogems;
 
     /// <summary>
+    /// The last 原粹树脂 the core reported, when it was the value the game
+    /// showed, and when the game was last seen adding a point -- the point the
+    /// window extrapolates from while no core is running.
+    /// </summary>
+    /// <remarks>
+    /// A cache of one model point, not a ledger: nothing about it is income or
+    /// expense.  The three travel together because the value alone is not
+    /// enough -- resin regenerates on its own, so a number without the instant
+    /// it was right at cannot be walked forward.  The anchor outlives the value
+    /// on purpose: it is a fact about the game's eight-minute window, so a core
+    /// that has just started, and has not seen a point yet, must not throw away
+    /// one an earlier session established.
+    /// </remarks>
+    public int? OriginalResin { get; set; }
+
+    /// <summary>When <see cref="OriginalResin"/> was the value the game showed.</summary>
+    public DateTimeOffset? OriginalResinAt { get; set; }
+
+    /// <summary>When the game was last seen adding a point of resin.</summary>
+    public DateTimeOffset? OriginalResinIncreasedAt { get; set; }
+
+    /// <summary>
     /// Which resources the wish total counts, as ledger keys.
     /// </summary>
     /// <remarks>

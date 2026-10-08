@@ -68,6 +68,29 @@ pub struct Status {
     /// currency key -> balance.  Before this run has seen any data these are
     /// the last values from the ledger, which is useful but not "live".
     pub balances: BTreeMap<&'static str, i64>,
+    /// 原粹树脂, as the model says the game is showing it *now*: the value the
+    /// game last reported plus the regeneration since (see [`crate::resin`]).
+    ///
+    /// Deliberately *not* part of `balances`: it is not a ledger currency, so
+    /// it has no income, no expense and no history, which is why it lives here
+    /// rather than in `ledger.jsonl`.
+    ///
+    /// It is a value **at `updated_at`**, because resin moves on its own and
+    /// the game sends nothing for that: a reader that wants it later has to add
+    /// one point per [`crate::resin::TICK_SECONDS`] itself, up to
+    /// [`crate::resin::CAP`].  Missing until the game reports a value at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_resin: Option<i64>,
+    /// When 原粹树脂 last went up on its own, if that has ever been seen.
+    ///
+    /// The anchor the value above is extrapolated along: the game adds a point
+    /// every eight minutes, so a reader that has this instant and the value at
+    /// some later instant can work out the value at any time after -- exactly,
+    /// and without this process still running.  Only a regeneration point sets
+    /// it; a sync, a spend or a fragile resin never does.  Missing until one has
+    /// been observed, which is the one case where the value can be a point low.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_resin_last_increase_at: Option<String>,
     /// Every recorded currency has a known balance (possibly from the ledger).
     pub complete: bool,
     /// Whether *this* run has received game data yet.

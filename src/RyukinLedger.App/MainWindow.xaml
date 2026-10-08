@@ -195,26 +195,94 @@
                 </StackPanel>
             </Grid>
 
-            <!-- 抓包状态：使用者最需要知道的一件事 -->
-            <Border Grid.Row="1" x:Name="StatusBanner" Style="{StaticResource Card}"
-                    Padding="14,9" Margin="0,0,0,12">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
+            <!--
+              抓包状态：使用者最需要知道的一件事。它左边是原粹树脂。
 
-                    <Ellipse x:Name="StatusDot" Width="10" Height="10" Fill="#C3B8AC"
-                             VerticalAlignment="Center" Margin="0,0,10,0" />
+              两张卡并排但彼此独立：右边说的是"内核现在在干什么"，左边是一个会自己往上
+              走的数字。树脂不进左边那六张资源卡，因为它既没有收支曲线，点开也没有图表
+              ——那六张是账本，它不是；放在状态条旁边只是因为两者都是"此刻"的信息，而
+              这一行的余量本来就够。
 
-                    <StackPanel Grid.Column="1">
-                        <TextBlock x:Name="StatusText" FontSize="13.5" FontWeight="SemiBold"
-                                   Foreground="#2B2521" TextWrapping="Wrap" />
-                        <TextBlock x:Name="StatusDetail" FontSize="12" Foreground="#7E7268"
-                                   Margin="0,3,0,0" TextWrapping="Wrap" />
-                    </StackPanel>
-                </Grid>
-            </Border>
+              树脂的数值是推算出来的：游戏每 8 分钟 +1，但不会为这个 +1 发任何包，所以
+              卡片上的数是"内核最后知道的数值 + 从那之后落下的拍数"。看到过一次 +1 之后，
+              内核会把那次的时间写进 original_resin_last_increase_at，界面拿它做减法
+              （两个时间点之间有几个 8 分钟边界），准确；只有登录同步值时才可能少 1。内核
+              没在跑时数字后面跟一个问号：没人在确认这个数。
+            -->
+            <Grid Grid.Row="1" Margin="0,0,0,12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <Border x:Name="ResinCard" Style="{StaticResource Card}" Padding="12,8"
+                        VerticalAlignment="Stretch">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+
+                        <!-- 缺图时整块留白由 ResinIcon 的 Visibility 决定，见 UpdateResin。 -->
+                        <Image x:Name="ResinIcon" Width="26" Height="26" Margin="0,0,9,0"
+                               VerticalAlignment="Center"
+                               RenderOptions.BitmapScalingMode="HighQuality" />
+
+                        <TextBlock Grid.Column="1" Text="原粹树脂" FontSize="12.5" Foreground="#8C8074"
+                                   Margin="0,0,14,0" VerticalAlignment="Center" />
+
+                        <!--
+                          数字（连同它的问号）整块上抬 2px，好让它的视觉中心和左边那行中文
+                          对齐。WPF 的 VerticalAlignment="Center" 居中的是"行框"：19px 的文
+                          字生成约 25px 高的行框，上面留的是西文的升部余量、下面留的是降部余
+                          量，而数字本身只占中偏下的 0.68em，于是行框居中时数字看起来比行框中
+                          心低约 2.5px；中文方块字几乎填满字身，行框中心就是它的视觉中心。用
+                          RenderTransform 而不是 Margin，是因为它不参与布局——行框仍然居中，
+                          卡片高度、图标、左边那行字都不受影响。整数偏移也是刻意的：半个像素会
+                          让 ClearType 的数字发糊。
+                        -->
+                        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                            <StackPanel.RenderTransform>
+                                <TranslateTransform Y="-2" />
+                            </StackPanel.RenderTransform>
+
+                            <TextBlock x:Name="ResinValueText" Text="—" FontSize="19"
+                                       FontWeight="SemiBold" Foreground="#2B2521"
+                                       VerticalAlignment="Center" />
+
+                            <!--
+                              只在这一个情况下有内容：内核没在跑，所以没有人在确认这个数
+                              （问号的意义见 UpdateResin）。垂直居中——它挨着一个 19px 的
+                              数字，贴底或贴顶都像是排版事故。
+                            -->
+                            <TextBlock x:Name="ResinMarkText" Text="" FontSize="14"
+                                       Foreground="#A2968A" Margin="4,0,0,0"
+                                       VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <Border Grid.Column="1" x:Name="StatusBanner" Style="{StaticResource Card}"
+                        Padding="14,9" Margin="12,0,0,0">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <Ellipse x:Name="StatusDot" Width="10" Height="10" Fill="#C3B8AC"
+                                 VerticalAlignment="Center" Margin="0,0,10,0" />
+
+                        <StackPanel Grid.Column="1">
+                            <TextBlock x:Name="StatusText" FontSize="13.5" FontWeight="SemiBold"
+                                       Foreground="#2B2521" TextWrapping="Wrap" />
+                            <TextBlock x:Name="StatusDetail" FontSize="12" Foreground="#7E7268"
+                                       Margin="0,3,0,0" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+            </Grid>
 
             <Grid Grid.Row="2">
                 <Grid.ColumnDefinitions>

@@ -71,6 +71,8 @@ internal static class AssetLibrary
     private static BitmapSource? _background;
     private static bool _appIconProbed;
     private static BitmapSource? _appIcon;
+    private static bool _resinIconProbed;
+    private static BitmapImage? _resinIcon;
 
     /// <summary>Where the artwork is expected to be.</summary>
     public static string Root { get; } = Path.Combine(AppContext.BaseDirectory, "assets");
@@ -167,6 +169,47 @@ internal static class AssetLibrary
             BitmapImage? loaded = Decode(FindCurrencyIcon(currency), IconDecodeWidth);
             Icons[currency] = loaded;
             return loaded;
+        }
+    }
+
+    /// <summary>
+    /// The 原粹树脂 icon, or <c>null</c> when there is no artwork for it.
+    /// </summary>
+    /// <remarks>
+    /// Resin is not a currency, so it is not in the per-currency cache above;
+    /// the file is named after the in-game name, which is the same convention
+    /// the currency icons follow.
+    /// </remarks>
+    public static BitmapImage? ResinIcon()
+    {
+        lock (Gate)
+        {
+            if (_resinIconProbed)
+            {
+                return _resinIcon;
+            }
+
+            _resinIconProbed = true;
+
+            foreach (string stem in new[] { "原粹树脂", "original-resin", "original_resin" })
+            {
+                foreach (string extension in new[] { ".png", ".jpg" })
+                {
+                    string candidate = Path.Combine(Root, stem + extension);
+                    if (File.Exists(candidate))
+                    {
+                        _resinIcon = Decode(candidate, IconDecodeWidth);
+                        break;
+                    }
+                }
+
+                if (_resinIcon is not null)
+                {
+                    break;
+                }
+            }
+
+            return _resinIcon;
         }
     }
 

@@ -33,6 +33,7 @@ mod ledger;
 mod monitor;
 mod process;
 mod proto_wire;
+mod resin;
 mod status;
 mod tracker;
 

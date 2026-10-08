@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use auto_artifactarium::r#gen::protos::PacketHead;
 use auto_artifactarium::{ConnectionPacket, GameCommand, GamePacket, GameSniffer};
 use base64::prelude::*;
+use chrono::Local;
 
 use crate::capture::{self, CaptureError};
 use crate::ledger::{Change, Ledger, now};
@@ -676,6 +677,11 @@ impl Monitor {
                 .map(|(currency, balance)| (currency.key(), *balance))
                 .collect(),
             complete: self.tracker.is_complete(),
+            original_resin: self.tracker.original_resin(Local::now()),
+            original_resin_last_increase_at: self
+                .tracker
+                .original_resin_increased_at()
+                .map(crate::ledger::timestamp),
             session_data: self.session_data,
             reconnects: self.reconnects,
             game_running: crate::process::game_running(),
@@ -943,12 +949,18 @@ mod tests {
         proto_wire::test_enc::store_notify(&items)
     }
 
+    /// The 原粹树脂 the login payloads above carry: the value a real 7.1 login
+    /// reported, sitting between the mora (10016) and the genesis crystals
+    /// (10025) of the same prop map.
+    const LOGIN_ORIGINAL_RESIN: i64 = 170;
+
     fn login_payload(primogems: i64, mora: i64, crystals: i64) -> Vec<u8> {
         proto_wire::test_enc::player_data_notify(
             &[
                 (proto_wire::PROP_PRIMOGEM, primogems),
                 (proto_wire::PROP_MORA, mora),
                 (proto_wire::PROP_GENESIS_CRYSTAL, crystals),
+                (proto_wire::PROP_ORIGINAL_RESIN, LOGIN_ORIGINAL_RESIN),
             ],
             Some("Traveler"),
         )
@@ -984,6 +996,33 @@ mod tests {
         assert_eq!(status["balances"]["acquaint_fate"], 3);
         assert_eq!(status["balances"]["masterless_starglitter"], 40);
 
+        // 原粹树脂 is reported beside the balances -- it is not one of them, so
+        // it does not affect "complete" or the wish totals, and it never
+        // reaches the ledger.  A sync alone cannot anchor the regeneration
+        // cadence, so the value is published without an anchor: a reader can
+        // still extrapolate, but the result can be one point low.
+        assert_eq!(status["original_resin"], LOGIN_ORIGINAL_RESIN);
+        assert!(
+            status.get("original_resin_last_increase_at").is_none(),
+            "a sync is not a regeneration point: {status:#?}"
+        );
+
+        // The game adding a point is what anchors it.  A resin change is not a
+        // ledger change, so nothing is published on its account -- the
+        // heartbeat is what carries it out, which the test stands in for.
+        let tick = proto_wire::test_enc::prop_notify(&[(
+            proto_wire::PROP_ORIGINAL_RESIN,
+            LOGIN_ORIGINAL_RESIN + 1,
+        )]);
+        monitor.handle_command(&command(4_009, tick)).unwrap();
+        monitor.publish().unwrap();
+        let status = read_status(&dir);
+        assert_eq!(status["original_resin"], LOGIN_ORIGINAL_RESIN + 1);
+        assert!(
+            status["original_resin_last_increase_at"].is_string(),
+            "a live +1 anchors the cadence: {status:#?}"
+        );
+
         // A chest gives 160 primogems, then a wish spends 160.
         let gain = proto_wire::test_enc::prop_notify(&[(proto_wire::PROP_PRIMOGEM, 5_160)]);
         monitor.handle_command(&command(4_002, gain)).unwrap();
@@ -1006,6 +1045,10 @@ mod tests {
 
         // Six starting points, one per currency, and the session books.
         assert_eq!(records.iter().filter(|r| r["kind"] == "baseline").count(), 6);
+        assert!(
+            records.iter().all(|r| r["currency"] != "original_resin"),
+            "the stock is published in status.json only: {records:#?}"
+        );
         assert_eq!(records[0]["kind"], "session");
         assert_eq!(records[0]["event"], "start");
         assert!(records.iter().any(|r| r["event"] == "identified" && r["nickname"] == "Traveler"));
