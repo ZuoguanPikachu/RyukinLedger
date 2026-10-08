@@ -14,6 +14,17 @@ namespace RyukinLedger.App;
 
 public partial class MainWindow : Window
 {
+    /// <summary>
+    /// How many ledger rows the "最近记录" card puts in its list.
+    /// </summary>
+    /// <remarks>
+    /// The card is 240 px tall and about seven rows fit, so this only decides how
+    /// far back one can scroll.  100 is roughly a week of ordinary play and it
+    /// keeps the list cheap to rebuild, which matters because the whole
+    /// collection is thrown away and rebuilt whenever the ledger changes.
+    /// </remarks>
+    private const int RecentRowsShown = 100;
+
     private readonly AppSettings _settings;
     private readonly LedgerStore _ledger;
     private readonly PullSourceSelection _pullSelection;
@@ -331,10 +342,19 @@ public partial class MainWindow : Window
                 ToolTip = $"点击查看{currency.DisplayName()}的每日收支",
             };
 
+            // The entry has to exist before the handlers are wired: they all name
+            // it, and the hover state lives on it.
+            var entry = new CurrencyCard(currency, card, balance, new TodayFigures(todayIncome, todayExpense));
+
             card.MouseLeftButtonUp += OnCurrencyCardClick;
 
+            // Hover shares ApplyCardChrome with the selection, so a card that is
+            // both selected and hovered cannot end up in the wrong colour.
+            card.MouseEnter += (_, _) => SetCardHover(entry, true);
+            card.MouseLeave += (_, _) => SetCardHover(entry, false);
+
             CurrencyGrid.Children.Add(card);
-            _cards.Add(new CurrencyCard(currency, card, balance, new TodayFigures(todayIncome, todayExpense)));
+            _cards.Add(entry);
         }
     }
 
@@ -386,16 +406,64 @@ public partial class MainWindow : Window
     {
         foreach (CurrencyCard card in _cards)
         {
-            bool selected = card.Currency == _selectedCurrency;
-
-            // Only two properties change, and the border thickness deliberately
-            // does not: growing it would nudge every card in the grid sideways
-            // each time the selection moved.
-            card.Container.BorderBrush = Brush(selected ? card.Currency.Accent() : "#E4D6C8");
-            card.Container.Background = Brush(selected ? "#EDFFFFFF" : "#B3FFFFFF");
+            ApplyCardChrome(card);
         }
 
         ChartTitle.Text = $"每日收支 · {_selectedCurrency.DisplayName()}";
+    }
+
+    /// <summary>Repaints one resource card from the two things that decide its look.</summary>
+    /// <remarks>
+    /// <para>
+    /// Those two things are whether it is the selected one and whether the
+    /// pointer is on it.  Both are painted here, in one place, because both write
+    /// the same two properties: split across two handlers, one would undo the
+    /// other, and a card that is selected *and* hovered would end up whichever
+    /// handler ran last.
+    /// </para>
+    /// <para>
+    /// The hover colours are here rather than in a Style trigger because
+    /// selection is already a local value on these borders, and a local value
+    /// beats a style trigger: the trigger would simply never fire.
+    /// </para>
+    /// <para>
+    /// Hover is a translucent warm tint rather than the tool buttons' solid
+    /// #FFF4E6.  These cards are the one place where the artwork is meant to
+    /// show through, and a big opaque panel flashing under the pointer is a
+    /// heavier change than "the pointer is on this".  The border does the
+    /// "this is live" part on its own.
+    /// </para>
+    /// </remarks>
+    private void ApplyCardChrome(CurrencyCard card)
+    {
+        bool selected = card.Currency == _selectedCurrency;
+
+        // The border thickness deliberately never changes: growing it would nudge
+        // every card in the grid sideways each time the selection moved.  For the
+        // same reason the hover state is a colour, not a thicker outline.
+        card.Container.BorderBrush = Brush(selected ? card.Currency.Accent()
+            : card.Hovered ? "#D9B98A"
+            : "#E4D6C8");
+
+        card.Container.Background = Brush((selected, card.Hovered) switch
+        {
+            (true, true) => "#F2FFF4E6",   // selected: stays bright, gains warmth
+            (true, false) => "#EDFFFFFF",
+            (false, true) => "#D9FFF4E6",  // hovered: warm, and more solid than at rest
+            (false, false) => "#B3FFFFFF",
+        });
+    }
+
+    /// <summary>Records the pointer entering or leaving a card and repaints it.</summary>
+    private void SetCardHover(CurrencyCard card, bool hovered)
+    {
+        if (card.Hovered == hovered)
+        {
+            return;
+        }
+
+        card.Hovered = hovered;
+        ApplyCardChrome(card);
     }
 
     // -----------------------------------------------------------------------
@@ -649,7 +717,7 @@ public partial class MainWindow : Window
         _activity.Clear();
         foreach (LedgerRow row in _ledger.Recent)
         {
-            if (_activity.Count >= 200)
+            if (_activity.Count >= RecentRowsShown)
             {
                 break;
             }
@@ -913,7 +981,11 @@ public partial class MainWindow : Window
         return brush;
     }
 
-    private sealed record CurrencyCard(Currency Currency, Border Container, TextBlock Balance, TodayFigures Today);
+    private sealed record CurrencyCard(Currency Currency, Border Container, TextBlock Balance, TodayFigures Today)
+    {
+        /// <summary>True while the pointer is over the card.  See <see cref="ApplyCardChrome"/>.</summary>
+        public bool Hovered { get; set; }
+    }
 
     /// <summary>The two value lines under a card's "今日" heading, always written together.</summary>
     private sealed record TodayFigures(TextBlock Income, TextBlock Expense);

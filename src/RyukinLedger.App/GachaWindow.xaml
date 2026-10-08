@@ -81,7 +81,6 @@
                     <StackPanel Margin="0,0,18,0">
                         <TextBlock Text="已垫抽数" Style="{StaticResource FieldLabel}" />
                         <TextBox x:Name="PityBox" Width="150" Height="30" MaxLength="2"
-                                 VerticalContentAlignment="Center" Padding="8,0"
                                  TextChanged="OnInputChanged" />
                     </StackPanel>
 
@@ -92,9 +91,13 @@
                                   SelectionChanged="OnInputChanged" />
                     </StackPanel>
 
-                    <StackPanel VerticalAlignment="Bottom" Margin="0,0,0,4">
+                    <!--
+                      Bottom aligned at 6 px: that is what puts the centre of the
+                      17 px check box on the centre line of the 30 px controls
+                      beside it, rather than a few pixels below it.
+                    -->
+                    <StackPanel VerticalAlignment="Bottom" Margin="0,0,0,6">
                         <CheckBox x:Name="GuaranteedCheck" Content="是否大保底"
-                                  FontSize="13" Foreground="#2B2521"
                                   Checked="OnInputChanged" Unchecked="OnInputChanged" />
                     </StackPanel>
                 </StackPanel>

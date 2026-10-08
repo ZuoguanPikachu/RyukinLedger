@@ -11,6 +11,8 @@
                   same style is how they end up looking different.
                 -->
                 <ResourceDictionary Source="Themes/Chip.xaml" />
+                <!-- 下拉菜单与滚动条的形状，同样两个窗口共用。 -->
+                <ResourceDictionary Source="Themes/Controls.xaml" />
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
     </Application.Resources>
