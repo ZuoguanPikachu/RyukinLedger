@@ -17,7 +17,7 @@
     会被写进 ledger.jsonl 的会话记录和 status.json —— 界面改一次版不该让它动。
   -->
   <PropertyGroup>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
   </PropertyGroup>
 
 </Project>
