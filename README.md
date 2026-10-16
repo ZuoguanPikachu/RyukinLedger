@@ -5,11 +5,14 @@
 数据靠抓包获得：Rust 写的无界面内核 `irminsul` 解析游戏的网络流量，把余额变化追加进
 `ledger.jsonl`；WPF 界面只读这个文件，负责展示、图表和托盘常驻。
 
+![RyukinLedger 主界面](docs/shot-main.png)
+
 ```
 RyukinLedger/
 ├─ src/irminsul/               抓包内核（Rust，无界面，需要管理员权限）
 ├─ src/RyukinLedger.App/       WPF 界面（托盘常驻 + 图表）
 ├─ assets/                     立绘与货币图标（可选，构建时原样复制到输出目录）
+├─ docs/                       README 里引用的截图
 └─ tools/                      构建与修复脚本
 ```
 

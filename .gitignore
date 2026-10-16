@@ -37,4 +37,4 @@ desktop.ini
 #                                 binary with include_bytes!
 #   assets/                       the artwork; the application copies it into
 #                                 the output folder
-#   shot-*.png                    screenshots used in the README
+#   docs/                         screenshots the README renders
