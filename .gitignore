@@ -29,6 +29,14 @@ desktop.ini
 *.swp
 *~
 
+# Local maintenance notes
+#
+# UPDATING.md is the handover runbook for the next game or upstream update: the
+# one constant that changes with a game version, where it lives, how to verify
+# it against this machine's logs.  It is notes for whoever works on the project
+# here, not part of what is shipped, so it stays out of the repository.
+UPDATING.md
+
 # NOT ignored, on purpose:
 #
 #   src/irminsul/.cargo/config.toml   static CRT linking: part of the build, not a

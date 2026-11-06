@@ -487,14 +487,14 @@ pub(crate) mod test_enc {
 
     /// A store notify carrying full items.
     ///
-    /// The items travel in field 6 (`PacketWithItems.items`), which is where the
-    /// 7.1 game update moved them; it was field 5 before.  The extractor is
+    /// The items travel in `PacketWithItems.items`, whose field number moves
+    /// with the game version (5 in 7.0, 6 in 7.1, 2 in 7.2).  The extractor is
     /// deliberately blind to the field number, so this only matters for keeping
     /// the synthetic packet shaped like the real one.
     pub fn store_notify(items: &[(u32, u64, u32)]) -> Vec<u8> {
         let mut out = Vec::new();
         for (item_id, guid, count) in items {
-            bytes(6, &item(*item_id, *guid, *count), &mut out);
+            bytes(2, &item(*item_id, *guid, *count), &mut out);
         }
         out
     }

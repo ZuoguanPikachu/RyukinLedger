@@ -22,18 +22,18 @@ const TICK: Duration = Duration::from_secs(1);
 /// Command id of `PlayerStoreNotify`, the packet that enumerates the whole
 /// inventory.
 ///
-/// It is private inside `auto-artifactarium`, and the game moved it with the
-/// 7.1 update (it was 8132 in 7.0).  The pinned revision of that crate still
-/// looks for the old id *and* the old field number for the items inside it, so
-/// it finds nothing in a 7.1 packet -- while our own wire parser reads the items
-/// out of it either way.  That is why this program recognises the packet by id
-/// itself; see `handle_command`.
+/// It is private inside `auto-artifactarium`, and the game moves it with every
+/// major update: 8132 in 7.0, 22160 in 7.1, 20892 in 7.2.  The pinned revision
+/// of that crate still looks for 7.0's id *and* 7.0's field number for the
+/// items inside it, so `matches_item_packet` finds nothing in a newer packet --
+/// while our own wire parser reads the items out of it either way.  That is why
+/// this program recognises the packet by id itself; see `handle_command`.
 ///
 /// **When the game updates and this stops matching**, upstream's `Update for
 /// 7.x` commit in <https://github.com/konkers/auto-artifactarium> contains the
 /// new number (it is a one-line change to the `CommandId` enum).  The warning in
 /// `report_missing_store_sync` is what tells you it is time to look.
-const PLAYER_STORE_NOTIFY: u16 = 22160;
+const PLAYER_STORE_NOTIFY: u16 = 20892;
 
 /// How long after the first game data to wait for a store sync before saying
 /// that none arrived.  The real one lands milliseconds after login.
@@ -475,10 +475,11 @@ impl Monitor {
 
         // The store sync is recognised by its command id, and its items are read
         // with our own wire parser rather than the generated protobuf type.  The
-        // 7.1 game update moved both the id and the field number the items live
-        // in, and the pinned decoder knows neither, so asking it would silently
-        // find nothing -- which is exactly how this packet came to be handled as
-        // an ordinary item change for months.
+        // 7.x updates move both the id and the field number the items live in
+        // (7.0: 8132 / field 5, 7.1: 22160 / field 6, 7.2: 20892 / field 2), and
+        // the pinned decoder knows only 7.0's, so asking it would silently find
+        // nothing -- which is exactly how this packet came to be handled as an
+        // ordinary item change for months.
         if command.command_id == PLAYER_STORE_NOTIFY
             && let Some(items) = proto_wire::extract_item_changes(&command.proto_data)
         {

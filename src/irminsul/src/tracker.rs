@@ -150,9 +150,9 @@ impl BalanceTracker {
     /// a zero-count item in any other packet.
     ///
     /// Takes `(item id, guid, count)` triples rather than the generated
-    /// protobuf type: the container field number of the store packet changed in
-    /// the 7.1 game update and the pinned decoder has not caught up, while our
-    /// own wire parser reads the items out of it either way.  See
+    /// protobuf type: the container field number of the store packet moves with
+    /// the game version (5 in 7.0, 6 in 7.1, 2 in 7.2), while our own wire
+    /// parser reads the items out of it either way.  See
     /// `monitor::PLAYER_STORE_NOTIFY`.
     pub fn snapshot_items(&mut self, items: &[(u32, u64, u32)]) -> Vec<Change> {
         for &(item_id, guid, _) in items {
