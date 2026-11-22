@@ -604,6 +604,14 @@ public partial class MainWindow : Window
                 parts.Add("解出命令后一直没等到真实数据；如果游戏内断过网，请退回登录界面重新登录。");
             }
 
+            if (_status!.TrackingStalled)
+            {
+                // A quiet connection is not "still recording": the core has
+                // decoded nothing for two minutes while the game is running.
+                // The cause is almost always a KCP hole the capture cannot fill.
+                parts.Add("已经连续两分钟没有解出游戏命令，记录实际上停住了；请退回登录界面重新登录以重新同步。");
+            }
+
             if (_status!.Nickname is { Length: > 0 } nickname)
             {
                 parts.Add($"账号 {nickname}");

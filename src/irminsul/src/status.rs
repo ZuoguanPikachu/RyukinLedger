@@ -100,6 +100,23 @@ pub struct Status {
     /// not be recorded, which is what the interface explains when the core asks
     /// for a login the player has already done.
     pub reconnects: u64,
+    /// Packets the capture backend itself dropped during this run.
+    ///
+    /// Unlike `reconnects`, this is not a verdict about the decoder: the packets
+    /// never reached it.  A dropped KCP segment cannot be recovered by a passive
+    /// reader, so a non-zero value is the one honest explanation for a ledger
+    /// that stops moving while the game is still being played.  The interface
+    /// shows it next to the state and suggests logging in again, which is what
+    /// makes the server send a fresh snapshot.
+    pub capture_lost: u64,
+    /// A connection that was recording has gone quiet while the game is running.
+    ///
+    /// The likely cause is a KCP segment the capture dropped: the decoder cannot
+    /// complete the message and every later command waits behind it.  Unlike a
+    /// reconnect, the core still holds a connection it can decode, so the state
+    /// is not changed; this flag is what lets the interface say that recording
+    /// has stopped in practice and that a fresh login is the repair.
+    pub tracking_stalled: bool,
     /// Whether the game process is running, so the app can tell "start the
     /// game" apart from "the game is running but the handshake was missed".
     pub game_running: bool,

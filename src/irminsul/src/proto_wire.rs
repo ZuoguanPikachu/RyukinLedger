@@ -59,12 +59,24 @@ pub const GENESIS_CRYSTAL_PROP_IDS: (u32, u32) = (PROP_GENESIS_CRYSTAL, PROP_MCO
 /// spelling of the same capture.
 pub const RESIN_PROP_IDS: [u32; 2] = [PROP_ORIGINAL_RESIN, PROP_LEGACY_ORIGINAL_RESIN];
 
-/// Player prop ids that predate the 7.0 namespace, used to recognise an
-/// incremental prop update from an older capture.
-const LEGACY_PROP_IDS: [u32; 4] = [PROP_HCOIN, PROP_SCOIN, PROP_MCOIN, PROP_LEGACY_ORIGINAL_RESIN];
-
-/// The 7.0 player prop namespace.  Avatar props (1001..4001) fall outside it.
-const MODERN_PROP_RANGE: std::ops::Range<u32> = 10000..20000;
+/// The player prop ids this program knows how to read, in both namespaces.
+///
+/// An incremental update is accepted only when it mentions one of these, rather
+/// than any key in the 7.0 namespace.  The wider rule was enough while the map
+/// was guaranteed to be the top-level field of the packet; once extraction
+/// recurses (a newer game version wraps the map in an outer message), the wider
+/// rule would also accept unrelated prop maps that happen to use 100xx ids.
+/// Every currency this program records is in this list, so nothing is lost.
+pub const TRACKED_PROP_IDS: [u32; 8] = [
+    PROP_PRIMOGEM,
+    PROP_MORA,
+    PROP_GENESIS_CRYSTAL,
+    PROP_ORIGINAL_RESIN,
+    PROP_HCOIN,
+    PROP_SCOIN,
+    PROP_MCOIN,
+    PROP_LEGACY_ORIGINAL_RESIN,
+];
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum WireType {
@@ -239,18 +251,20 @@ pub struct PlayerDataPacket {
 /// These are pushed by the server whenever a player prop changes (e.g. the
 /// primogem count after spending).  Unlike the full player-data packet, the
 /// notify only carries the changed props, as repeated `map<uint32, PropValue>`
-/// entries at the top level -- so the pair gate of [`extract_player_props`]
-/// does not apply.  We accept any top-level map with at least one key in the
-/// player-prop namespace.  Avatar prop maps (keys 1001..4001, nested inside
-/// avatar messages) do not match: their entries are not at the top level and
-/// their keys fall outside the namespace.
+/// entries -- so the pair gate of [`extract_player_props`] does not apply.
+///
+/// The entries are normally the packet's top-level field (in 6.x, for example,
+/// `PlayerPropNotify.prop_map = 11`).  A game version may move that field into
+/// an outer message, which is exactly how a live update can survive the login
+/// snapshot (whose prop map is nested and was already scanned recursively) but
+/// stop being recorded.  So the scan is recursive here too, and only keys this
+/// program knows are kept: avatar prop maps (1001..4001) and the world/entity
+/// prop maps are then rejected by id rather than by nesting depth.
 pub fn extract_prop_updates(data: &[u8]) -> Option<BTreeMap<u32, i64>> {
     let mut props = BTreeMap::new();
-    // No recursion: update notifies carry their entries directly at the top
-    // level (field 1).
-    collect_props(data, 0, &mut props);
+    collect_props(data, 2, &mut props);
 
-    props.retain(|&key, _| MODERN_PROP_RANGE.contains(&key) || LEGACY_PROP_IDS.contains(&key));
+    props.retain(|key, _| TRACKED_PROP_IDS.contains(key));
     if props.is_empty() {
         None
     } else {
@@ -345,12 +359,27 @@ fn parse_item_with_count(data: &[u8]) -> Option<(u32, u64, u32)> {
 /// The nickname is a plain UTF-8 string field at the top level of the same
 /// message as the prop map.  See [`extract_player_props`] for the message
 /// acceptance criteria.
+///
+/// The pair gate of [`extract_player_props`] is not enough to tell a login
+/// snapshot from a live update that happens to mention both primogems and
+/// mora -- the server sends them together when a chest or a quest rewards
+/// both.  Treating such an update as a snapshot turns a real income into an
+/// unattributed gap.  A genuine player-data message therefore has to look like
+/// one: it carries the nickname, or the whole set of currencies (the snapshot
+/// always contains them, a changed-props notify does not).
 pub fn extract_player_packet(data: &[u8]) -> Option<PlayerDataPacket> {
     let props = extract_player_props(data)?;
-    Some(PlayerDataPacket {
-        props,
-        nick_name: find_nickname(data),
-    })
+    let nick_name = find_nickname(data);
+
+    let has_all_currencies = [PRIMOGEM_PROP_IDS, MORA_PROP_IDS, GENESIS_CRYSTAL_PROP_IDS]
+        .iter()
+        .all(|ids| prop_value(&props, *ids).is_some());
+
+    if nick_name.is_none() && !has_all_currencies {
+        return None;
+    }
+
+    Some(PlayerDataPacket { props, nick_name })
 }
 
 /// Scan the top-level length-delimited fields of the player-data message for
@@ -576,6 +605,53 @@ mod tests {
         // Legacy ids survive the namespace filter too.
         let payload = prop_notify(&[(PROP_HCOIN, 5)]);
         assert_eq!(extract_prop_updates(&payload).and_then(|p| p.get(&PROP_HCOIN).copied()), Some(5));
+    }
+
+    /// A live update that mentions both primogems and mora -- one chest, one
+    /// quest reward -- has the same pair the login snapshot has.  It is not a
+    /// snapshot: it has no nickname and no genesis crystals.  Reading it as one
+    /// would record the reward as an unattributed gap instead of income.
+    #[test]
+    fn a_live_update_with_both_currencies_is_not_player_data() {
+        let payload = player_data_notify(&[(PROP_PRIMOGEM, 12_640), (PROP_MORA, 3_499_000)], None);
+        assert!(
+            extract_player_packet(&payload).is_none(),
+            "a changed-props notify must not be read as the login snapshot"
+        );
+
+        let props = extract_prop_updates(&payload).expect("the update itself is still readable");
+        assert_eq!(props.get(&PROP_PRIMOGEM), Some(&12_640));
+        assert_eq!(props.get(&PROP_MORA), Some(&3_499_000));
+    }
+
+    /// The prop map is not guaranteed to stay the packet's top-level field.  A
+    /// map wrapped one level deep must still be found: the login snapshot has
+    /// always been scanned recursively, and a live update that stops being
+    /// found there would silently freeze the ledger while the snapshot keeps
+    /// working.
+    #[test]
+    fn extracts_a_wrapped_prop_update() {
+        let mut inner = Vec::new();
+        prop_entry(PROP_PRIMOGEM, 7_310, &mut inner);
+
+        let mut wrapped = Vec::new();
+        bytes(3, &inner, &mut wrapped);
+
+        let props = extract_prop_updates(&wrapped).expect("a nested prop map should be recognised");
+        assert_eq!(props.get(&PROP_PRIMOGEM), Some(&7_310));
+    }
+
+    /// Recursion must not turn every prop map in unrelated traffic into a
+    /// currency update.  Only keys this program records are accepted.
+    #[test]
+    fn nested_unrelated_props_are_rejected() {
+        let mut avatar = Vec::new();
+        prop_entry(2_001, 9, &mut avatar);
+
+        let mut wrapped = Vec::new();
+        bytes(3, &avatar, &mut wrapped);
+
+        assert!(extract_prop_updates(&wrapped).is_none());
     }
 
     /// The resin id is the one prop id in this file that came out of a capture,

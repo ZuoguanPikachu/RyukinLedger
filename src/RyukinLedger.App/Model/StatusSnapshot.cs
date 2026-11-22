@@ -92,6 +92,31 @@ public sealed class StatusSnapshot
     /// </summary>
     public long Reconnects { get; init; }
 
+    /// <summary>
+    /// Packets the capture backend dropped during this run.
+    /// </summary>
+    /// <remarks>
+    /// A different failure from <see cref="Reconnects"/>: those packets never
+    /// reached the decoder.  The game's KCP stream is reliable towards its real
+    /// client, so a dropped segment is never retransmitted and a passive reader
+    /// cannot fill the hole; the ledger can then stop moving while the core still
+    /// says it is recording.  The interface uses this number to say what
+    /// happened and to point at the one repair that works (log in again).
+    /// </remarks>
+    public long CaptureLost { get; init; }
+
+    /// <summary>
+    /// A connection that was recording has gone quiet while the game is running.
+    /// </summary>
+    /// <remarks>
+    /// The likely cause is a KCP segment the capture dropped: the decoder cannot
+    /// complete the message and every later command waits behind it.  The core
+    /// still holds a decodable connection, so it does not change the state; this
+    /// flag is what lets the interface say that recording has stopped in
+    /// practice, and that logging in again is the repair.
+    /// </remarks>
+    public bool TrackingStalled { get; init; }
+
     public bool GameRunning { get; init; }
     public long Transactions { get; init; }
 
@@ -164,6 +189,8 @@ public sealed class StatusSnapshot
                 Complete = GetBool(root, "complete"),
                 SessionData = GetBool(root, "session_data"),
                 Reconnects = GetInt64(root, "reconnects") ?? 0,
+                CaptureLost = GetInt64(root, "capture_lost") ?? 0,
+                TrackingStalled = GetBool(root, "tracking_stalled"),
                 GameRunning = GetBool(root, "game_running"),
                 Transactions = GetInt64(root, "transactions") ?? 0,
             };

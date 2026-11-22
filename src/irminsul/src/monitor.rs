@@ -39,6 +39,17 @@ const PLAYER_STORE_NOTIFY: u16 = 20892;
 /// that none arrived.  The real one lands milliseconds after login.
 const STORE_SYNC_GRACE: Duration = Duration::from_secs(30);
 
+/// How long a recording connection may go without decoding a single command
+/// before saying that it has stalled.
+///
+/// The game sends keepalives continuously, so silence here is not "the player
+/// is idle": it is the passive KCP decoder waiting for a segment the capture
+/// dropped and the real client already acknowledged.  Nothing will complete
+/// that message, and every later command is queued behind it.  The warning is
+/// the only way to tell "recording" apart from "blind" without claiming a
+/// capture the run cannot back up.
+const TRACKING_STALL_GRACE: Duration = Duration::from_secs(120);
+
 /// How many packets the decoder may fail to decrypt, without decoding anything
 /// in between, before the connection state is thrown away.
 ///
@@ -115,6 +126,19 @@ pub struct Monitor {
     /// game merely replaced -- leaving co-op, say -- is not counted, because
     /// nothing is missed there.
     reconnects: u64,
+    /// Packets the capture backend reported dropping during this run.  Read
+    /// from the capture library's own warnings; see `note_capture_loss`.
+    capture_lost: u64,
+    /// The value of the process-wide capture-loss counter already accounted
+    /// for by this run.
+    capture_lost_seen: u64,
+    /// The capture-loss warning has been printed for this run.
+    capture_loss_reported: bool,
+    /// When the last command of any kind decoded, used to tell a stalled
+    /// connection from an idle one.
+    last_command_at: Option<Instant>,
+    /// The stalled-recording warning has been printed for this connection.
+    tracking_stall_reported: bool,
     /// When the first game data of this run arrived, used to time the check for
     /// a missing store sync.
     first_data_at: Option<Instant>,
@@ -171,6 +195,11 @@ impl Monitor {
             first_command_at: None,
             stall_reported: false,
             reconnects: 0,
+            capture_lost: 0,
+            capture_lost_seen: 0,
+            capture_loss_reported: false,
+            last_command_at: None,
+            tracking_stall_reported: false,
             first_data_at: None,
             store_sync_seen: false,
             missing_store_reported: false,
@@ -228,8 +257,10 @@ impl Monitor {
                     }
                     // The heartbeat is also the only place a *missing* packet can
                     // be noticed: nothing arrives to trigger it.
+                    self.note_capture_loss();
                     self.report_missing_store_sync();
                     self.report_stalled_login();
+                    self.report_stalled_tracking(crate::process::game_running());
                     // Heartbeat: also proves to the app that we are alive.
                     self.publish()?;
                     continue;
@@ -285,6 +316,7 @@ impl Monitor {
         // Read after the decoder has run: what it could not read on this packet
         // is part of the totals by now, because they are counted while its
         // complaints are on their way to the log.
+        self.note_capture_loss();
         let unreadable = self.count_unreadable();
 
         match parsed {
@@ -417,6 +449,69 @@ impl Monitor {
         unreadable
     }
 
+    /// Note packets the *capture* dropped, as opposed to packets the decoder
+    /// could not read.
+    ///
+    /// The distinction matters for what the program can still do.  An unreadable
+    /// packet costs the session key and the core eventually gives up on it; a
+    /// dropped packet is one the real client received and acknowledged, so the
+    /// server will never send it again and a passive reader has no way to fill
+    /// the hole.  If the hole is in the middle of a KCP message, every later
+    /// command waits behind it until a fresh login.  The interface is told, so
+    /// it can ask for that login instead of showing a ledger that has silently
+    /// stopped moving.
+    fn note_capture_loss(&mut self) {
+        let total = crate::decoder_log::capture_lost_packets();
+        let lost = total.saturating_sub(self.capture_lost_seen);
+        if lost == 0 {
+            return;
+        }
+
+        self.capture_lost_seen = total;
+        self.capture_lost += lost;
+
+        if !self.capture_loss_reported {
+            self.capture_loss_reported = true;
+            tracing::warn!(
+                "the packet capture dropped {lost} packet(s) (this run: {}); a dropped KCP segment \
+                 cannot be recovered by a passive reader.  If balances stop updating while the game \
+                 is running, log in again so the server sends a fresh snapshot",
+                self.capture_lost
+            );
+        }
+    }
+
+    /// Say so when a connection that was recording goes quiet.
+    ///
+    /// The game sends commands continuously; 120 seconds without one is not an
+    /// idle player, it is the decoder waiting for a segment that will never
+    /// arrive.  This is deliberately a warning and not a state change: it names
+    /// the likely cause and the one action that repairs it, and leaves the
+    /// decision to the player.
+    fn report_stalled_tracking(&mut self, game_running: bool) {
+        if !game_running || !self.session_data || self.tracking_stall_reported {
+            return;
+        }
+
+        let Some(last) = self.last_command_at else {
+            return;
+        };
+
+        if last.elapsed() < TRACKING_STALL_GRACE {
+            return;
+        }
+
+        self.tracking_stall_reported = true;
+        let histogram = self.command_histogram();
+        tracing::warn!(
+            "no command decoded for {}s while the game is running; the capture may have lost a KCP \
+             segment.  Log in again to let the server send a fresh snapshot.  Commands seen: \
+             {histogram}; capture dropped {} packet(s) this run",
+            last.elapsed().as_secs(),
+            self.capture_lost
+        );
+    }
+
     /// Forget what the run knows about the connection that just ended.
     ///
     /// These flags all describe a live connection: whether handshake traffic has
@@ -433,6 +528,8 @@ impl Monitor {
         self.lost_searches = 0;
         self.first_command_at = None;
         self.stall_reported = false;
+        self.last_command_at = None;
+        self.tracking_stall_reported = false;
         self.first_data_at = None;
     }
 
@@ -457,6 +554,8 @@ impl Monitor {
         self.unreadable = 0;
         self.lost_searches = 0;
         self.first_command_at.get_or_insert_with(Instant::now);
+        self.last_command_at = Some(Instant::now());
+        self.tracking_stall_reported = false;
 
         *self.commands_seen.entry(command.command_id).or_insert(0) += 1;
 
@@ -685,6 +784,8 @@ impl Monitor {
                 .map(crate::ledger::timestamp),
             session_data: self.session_data,
             reconnects: self.reconnects,
+            capture_lost: self.capture_lost,
+            tracking_stalled: self.tracking_stall_reported,
             game_running: crate::process::game_running(),
             transactions: self.ledger.transactions(),
         }
@@ -1101,6 +1202,74 @@ mod tests {
 
         // The first session is closed in the ledger.
         assert!(records.iter().any(|r| r["event"] == "end" && r["reason"] == "stop-request"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A live reward that changes primogems and mora together reaches the
+    /// ledger as income, not as a snapshot gap: the two-currency notify is not
+    /// the login packet.  This is the in-game case the ledger used to lose.
+    #[test]
+    fn an_in_game_reward_with_two_currencies_is_income() {
+        let dir = temp_dir("two-currency-live");
+        let mut monitor = Monitor::new(&dir, None, None, None).unwrap();
+        monitor.handle_command(&command(4_001, login_payload(1_000, 500, 0))).unwrap();
+
+        let reward = proto_wire::test_enc::player_data_notify(
+            &[(proto_wire::PROP_PRIMOGEM, 1_330), (proto_wire::PROP_MORA, 59_632)],
+            None,
+        );
+        monitor.handle_command(&command(4_002, reward)).unwrap();
+
+        let records = ledger_lines(&dir);
+        let txs: Vec<&serde_json::Value> = records.iter().filter(|r| r["kind"] == "tx").collect();
+        assert_eq!(txs.len(), 2, "both currencies are one live change each: {records:#?}");
+        assert_eq!(txs[0]["currency"], "primogems");
+        assert_eq!(txs[0]["delta"], 330);
+        assert_eq!(txs[1]["currency"], "mora");
+        assert_eq!(txs[1]["delta"], 59_132);
+        assert!(
+            records.iter().all(|r| r["kind"] != "gap"),
+            "a live update must not be recorded as downtime: {records:#?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Capture loss is published, because it is the one explanation for a
+    /// ledger that stops moving without the decoder reporting anything wrong.
+    #[test]
+    fn capture_loss_is_published() {
+        let dir = temp_dir("capture-loss");
+        let mut monitor = Monitor::new(&dir, None, None, None).unwrap();
+        monitor.capture_lost = 61;
+        monitor.publish().unwrap();
+
+        assert_eq!(read_status(&dir)["capture_lost"], 61);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A connection that decoded commands and then goes quiet while the game is
+    /// running is reported once, with the command histogram.  This is the shape
+    /// of a missed KCP segment: nothing decodes, but nothing errors either.
+    #[test]
+    fn a_stalled_recording_is_reported_once() {
+        let dir = temp_dir("stalled-tracking");
+        let mut monitor = Monitor::new(&dir, None, None, None).unwrap();
+        monitor.handle_command(&command(4_001, login_payload(1_000, 500, 0))).unwrap();
+        monitor.last_command_at = Some(Instant::now() - TRACKING_STALL_GRACE - Duration::from_secs(1));
+
+        // The game is not running in the test environment; the caller supplies
+        // that fact, which is also what keeps an idle game from being reported.
+        monitor.report_stalled_tracking(false);
+        assert!(!monitor.tracking_stall_reported, "a game that is not running is not stalled");
+
+        monitor.report_stalled_tracking(true);
+        assert!(monitor.tracking_stall_reported);
+
+        // A decoded command clears the report, so a later stall is said again.
+        monitor.handle_command(&command(4_002, login_payload(1_000, 500, 0))).unwrap();
+        assert!(!monitor.tracking_stall_reported);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

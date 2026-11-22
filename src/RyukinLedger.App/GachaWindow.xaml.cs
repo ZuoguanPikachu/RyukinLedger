@@ -26,9 +26,33 @@ namespace RyukinLedger.App;
 /// </remarks>
 public partial class GachaWindow : Window
 {
+    /// <summary>
+    /// The number of copies the selector offers.  Seven is a full C6, which is
+    /// the largest target a limited character can have; a weapon needs fewer.
+    /// </summary>
+    private const int MaxTargets = 7;
+
+    /// <summary>
+    /// How close to 1.0 counts as "certain".  Probabilities are floating point
+    /// sums, so a guaranteed target lands a few ulps below 1 rather than on it.
+    /// </summary>
+    private const double Certain = 1.0 - 1e-9;
+
     private readonly PullSourceSelection _selection;
     private readonly Dictionary<Currency, long> _balances = [];
     private bool _ready;
+
+    /// <summary>
+    /// True until the player picks a target themselves.  While it is true the
+    /// selector follows the balance: the default is the smallest target whose
+    /// achievement is *not* certain, so the probability shown is worth reading
+    /// (181 pulls, for example, guarantees one rate-up 5★ and leaves the second
+    /// at less than 100%).
+    /// </summary>
+    private bool _autoTarget = true;
+
+    /// <summary>Set while the code moves the selector, so that is not a user choice.</summary>
+    private bool _suppressTargetChange;
 
     public GachaWindow(PullSourceSelection selection)
     {
@@ -39,7 +63,7 @@ public partial class GachaWindow : Window
         _selection = selection;
         _selection.Changed += OnSelectionChanged;
 
-        TargetSelector.ItemsSource = Enumerable.Range(1, 7).Select(count => new CountChoice(count)).ToList();
+        TargetSelector.ItemsSource = Enumerable.Range(1, MaxTargets).Select(count => new CountChoice(count)).ToList();
         TargetSelector.SelectedIndex = 0;
 
         FateSelector.ItemsSource = Enumerable.Range(0, 4).Select(fate => new FateChoice(fate)).ToList();
@@ -112,7 +136,23 @@ public partial class GachaWindow : Window
         Recalculate();
     }
 
-    private void OnInputChanged(object sender, RoutedEventArgs e) => Recalculate();
+    private void OnInputChanged(object sender, RoutedEventArgs e)
+    {
+        // The initial values are assigned before the window is consistent.
+        // Programmatic target changes are not a user choice either, and must
+        // not bounce back into another recalculation.
+        if (!_ready || _suppressTargetChange)
+        {
+            return;
+        }
+
+        if (ReferenceEquals(sender, TargetSelector))
+        {
+            _autoTarget = false;
+        }
+
+        Recalculate();
+    }
 
     private void Recalculate()
     {
@@ -140,13 +180,39 @@ public partial class GachaWindow : Window
             return;
         }
 
-        var parameters = new GachaParameters(
-            TargetSelector.SelectedItem is CountChoice count ? count.Count : 1,
-            pity,
-            GuaranteedCheck.IsChecked == true,
-            FateSelector.SelectedItem is FateChoice fate ? fate.Fate : 0);
+        bool guaranteed = GuaranteedCheck.IsChecked == true;
+        int fatePoints = FateSelector.SelectedItem is FateChoice fate ? fate.Fate : 0;
+        int selectedTarget = TargetSelector.SelectedItem is CountChoice count ? count.Count : 1;
 
-        GachaResult result = GachaCalculator.Calculate(parameters);
+        GachaParameters Parameters(int target) =>
+            new(target, pity, guaranteed, fatePoints);
+
+        GachaResult result;
+        if (_autoTarget)
+        {
+            // The smallest target the balance does *not* already guarantee:
+            // below that the probability is 100% and tells the player nothing.
+            // It also keeps the number on the selector from starting at one
+            // when the balance is already worth two or more.
+            int target = 1;
+            result = GachaCalculator.Calculate(Parameters(target));
+            while (target < MaxTargets && result.ProbabilityWithin(currentPulls) >= Certain)
+            {
+                target++;
+                result = GachaCalculator.Calculate(Parameters(target));
+            }
+
+            if (TargetSelector.SelectedIndex != target - 1)
+            {
+                _suppressTargetChange = true;
+                TargetSelector.SelectedIndex = target - 1;
+                _suppressTargetChange = false;
+            }
+        }
+        else
+        {
+            result = GachaCalculator.Calculate(Parameters(selectedTarget));
+        }
 
         ExpectationText.Text = result.Expectation.ToString("0.0", CultureInfo.InvariantCulture);
         P50Text.Text = result.P50.ToString(CultureInfo.InvariantCulture);

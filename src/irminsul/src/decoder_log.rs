@@ -42,11 +42,19 @@ const FOREIGN_CONVERSATION: &str = "packet did not belong to conversation";
 /// Written for a datagram too short to carry a KCP header at all.
 const SHORT_HEADER: &str = "kcp header was too short";
 
+/// The packet capture itself dropped packets, before the decoder ever saw
+/// them.  The number is part of the message; see [`capture_lost_packets`].
+const MISSED_WRITE: &str = "missed writing packets!!:";
+const MISSED_READ: &str = "missed reading packets!!:";
+
 /// Searches the decoder has run and lost since this process started.
 static LOST_SEARCHES: AtomicU64 = AtomicU64::new(0);
 
 /// Packets the decoder could not use at all since this process started.
 static UNREADABLE: AtomicU64 = AtomicU64::new(0);
+
+/// Packets the capture backend itself dropped since this process started.
+static CAPTURE_LOST: AtomicU64 = AtomicU64::new(0);
 
 /// How many searches over the seeds the decoder has run and lost so far.
 pub fn lost_searches() -> u64 {
@@ -62,6 +70,20 @@ pub fn lost_searches() -> u64 {
 /// searches, none in the last case, because there is nothing to search.
 pub fn unreadable_packets() -> u64 {
     UNREADABLE.load(Ordering::Relaxed)
+}
+
+/// How many packets the capture backend reports having dropped so far.
+///
+/// This is a different failure from [`unreadable_packets`]: the packet never
+/// reached the decoder.  The game's KCP stream is reliable towards its real
+/// client, so a segment the client acknowledged is never retransmitted -- and a
+/// passive decoder that missed it can never complete the message.  It waits
+/// forever while every later command queues behind the hole.  That is the
+/// "recorded nothing for half an hour, then a gap at the next login" failure,
+/// and it is why this number is published and warned about rather than only
+/// written to the log by the capture library.
+pub fn capture_lost_packets() -> u64 {
+    CAPTURE_LOST.load(Ordering::Relaxed)
 }
 
 /// Drops the decoder's per-packet complaints and counts them.
@@ -97,8 +119,33 @@ impl<S: tracing::Subscriber> Filter<S> for DecoderTrouble {
             return false;
         }
 
+        // The capture library's own loss report.  It stays in the log -- it is
+        // evidence, and there may be no other line explaining a stalled
+        // capture -- but it is also counted so the core can say so in
+        // status.json instead of leaving the interface claiming to record.
+        if text.contains(MISSED_WRITE) || text.contains(MISSED_READ) {
+            if let Some(count) = loss_count(&text) {
+                CAPTURE_LOST.fetch_add(count, Ordering::Relaxed);
+            }
+            return true;
+        }
+
         true
     }
+}
+
+/// The packet count at the end of a capture-loss message.
+///
+/// The message is `missed writing packets!!: 55`; the text before the final
+/// colon is prose, so only the last component is parsed.  A malformed line
+/// counts as one rather than as zero -- the report is still evidence of loss.
+fn loss_count(text: &str) -> Option<u64> {
+    let (_, tail) = text.rsplit_once(':')?;
+    let tail = tail.trim();
+    if tail.is_empty() {
+        return None;
+    }
+    tail.parse::<u64>().ok().or(Some(1))
 }
 
 /// The `message` field of an event, however tracing decided to record it.
@@ -239,5 +286,23 @@ mod tests {
             before.0 + 3,
             "a search that was lost belongs to a packet that was already counted"
         );
+    }
+
+    /// A capture-drop report stays in the log and is counted: the count is what
+    /// the interface needs to say that data may be missing, and the line is the
+    /// evidence behind it.
+    #[test]
+    fn capture_losses_are_counted_and_kept() {
+        let _counting = counting();
+        let before = capture_lost_packets();
+
+        let log = logged(|| {
+            tracing::warn!(target: "pktmon::realtime", "missed writing packets!!: 55");
+            tracing::warn!(target: "pktmon::realtime", "missed reading packets!!: 6");
+        });
+
+        assert_eq!(capture_lost_packets(), before + 61);
+        assert!(log.contains("missed writing packets!!: 55"), "{log}");
+        assert!(log.contains("missed reading packets!!: 6"), "{log}");
     }
 }
